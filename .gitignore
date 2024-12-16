@@ -1,0 +1,26 @@
+# Ignore environment file
+.env
+
+# Ignore Python bytecode and cache directories
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore log files
+*.log
+
+# Ignore virtual environments (if any)
+venv/
+.env/
+
+# Ignore IDE/editor-specific files (optional)
+.vscode/
+.idea/
+
+conversation_history.log  
+interview_scheduler.log
+
+app_token.json
+
+credentials.json
