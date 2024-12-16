@@ -286,11 +286,6 @@ John Doe,+1234567890,john.doe@company.com,normal,60,Mike Johnson,+1122334455,mik
 Alice Brown,+1234567891,alice.b@company.com,high,45,Tom Wilson,+1987654322,tom.w@email.com,Product Manager,Sarah Wilson,+1234567899,sarah.w@company.com,Tech Corp is a leading software company
 ```
 
-##### Other AI Endpoints
-- `POST /api/detect-intent`: Analyze message intent
-- `POST /api/generate-response`: Generate AI response
-- `POST /api/validate-context`: Check message relevance
-
 #### Scheduling Endpoints
 - `POST /api/create_event/<conversation_id>`: Create calendar event
 - `GET /api/conversations/active`: Get active conversations
