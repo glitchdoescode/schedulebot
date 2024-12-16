@@ -203,7 +203,7 @@ RESPONSE_TIMEOUT=3600
 1. Clone the repository
 ```bash
 git clone <repository-url>
-cd ai-interview-scheduler
+cd schedulebot
 ```
 
 2. Set up backend
