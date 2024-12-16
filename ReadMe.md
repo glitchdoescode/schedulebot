@@ -237,7 +237,56 @@ npm run dev
 ### API Endpoints
 
 #### AI Agent Endpoints
-- `POST /api/initialize`: Initialize AI-driven conversation
+
+##### Initialize Conversation
+- Endpoint: `POST /api/initialize`
+- Description: Initialize new AI-driven conversations for interviews
+- Sample Payload:
+```json
+{
+  "conversations": [
+    {
+      "interviewer_name": "John Doe",
+      "interviewer_number": "+1234567890",
+      "interviewer_email": "john.doe@company.com",
+      "interviewer_timezone": "America/New_York",
+      "superior_flag": "normal",
+      "meeting_duration": 60,
+      "interviewees": [
+        {
+          "name": "Jane Smith",
+          "number": "+1987654321",
+          "email": "jane.smith@email.com",
+          "jd_title": "Senior Software Engineer"
+        },
+        {
+          "name": "Mike Johnson",
+          "number": "+1122334455",
+          "email": "mike.j@email.com",
+          "jd_title": "DevOps Engineer"
+        }
+      ],
+      "role_to_contact_name": "Sarah Wilson",
+      "role_to_contact_number": "+1234567899",
+      "role_to_contact_email": "sarah.w@company.com",
+      "company_details": "Tech Corp is a leading software company specializing in AI solutions."
+    }
+  ]
+}
+```
+
+##### Bulk Upload via CSV
+- Endpoint: `POST /api/upload-csv`
+- Description: Initialize multiple interviews using CSV upload
+- Sample CSV Format:
+```csv
+interviewer_name,interviewer_number,interviewer_email,superior_flag,meeting_duration,interviewee_name,interviewee_number,interviewee_email,jd_title,role_to_contact_name,role_to_contact_number,role_to_contact_email,company_details
+John Doe,+1234567890,john.doe@company.com,normal,60,Jane Smith,+1987654321,jane.smith@email.com,Senior Software Engineer,Sarah Wilson,+1234567899,sarah.w@company.com,Tech Corp is a leading software company
+John Doe,+1234567890,john.doe@company.com,normal,60,Mike Johnson,+1122334455,mike.j@email.com,DevOps Engineer,Sarah Wilson,+1234567899,sarah.w@company.com,Tech Corp is a leading software company
+Alice Brown,+1234567891,alice.b@company.com,high,45,Tom Wilson,+1987654322,tom.w@email.com,Product Manager,Sarah Wilson,+1234567899,sarah.w@company.com,Tech Corp is a leading software company
+```
+
+##### Other AI Endpoints
 - `POST /api/detect-intent`: Analyze message intent
 - `POST /api/generate-response`: Generate AI response
 - `POST /api/validate-context`: Check message relevance
