@@ -206,3 +206,40 @@ class CalendarService:
                     return False
                 time.sleep(current_delay)
                 current_delay = min(current_delay * 2, 30)  # Exponential backoff
+
+    def update_event(self, conversation_id: str, event_id: str, new_start_time: str, new_end_time: str) -> bool:
+        """
+        Update the event's start and end time on the calendar.
+        Returns True if successful, False otherwise.
+        """
+        try:
+            credentials = load_credentials()
+            if not credentials:
+                logger.error("Failed to load credentials for update_event")
+                return False
+
+            service = build('calendar', 'v3', credentials=credentials)
+            event_body = {
+                'start': {'dateTime': new_start_time},
+                'end': {'dateTime': new_end_time}
+            }
+
+            updated_event = service.events().patch(
+                calendarId='primary',
+                eventId=event_id,
+                body=event_body,
+                sendUpdates='all'
+            ).execute()
+
+            if updated_event:
+                logger.info(f"Event {event_id} updated successfully for conversation {conversation_id}.")
+                return True
+            else:
+                logger.error(f"Failed to update event {event_id}. No event returned.")
+                return False
+        except HttpError as e:
+            logger.error(f"Google Calendar API error during update_event: {str(e)}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error updating calendar event {event_id}: {str(e)}")
+            return False

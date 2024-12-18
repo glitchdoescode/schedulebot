@@ -25,20 +25,15 @@ your_db_name = os.getenv("MONGODB_DB_NAME")
 logger = logging.getLogger(__name__)
 
 class AttentionFlagEvaluator:
-    """
-    Evaluates which attention flags need to be raised for a conversation.
-    """
-    RESPONSE_THRESHOLD = timedelta(hours=24)  # Example threshold for no response
+    RESPONSE_THRESHOLD = timedelta(hours=24)
 
     def evaluate_conversation_flags(self, conversation, current_time):
         flags = {}
-        # Evaluate interviewer
         interviewer = conversation['interviewer']
         interviewer_flags = self.evaluate_participant_flags(conversation, 'interviewer', interviewer, current_time)
         if interviewer_flags:
             flags['interviewer'] = interviewer_flags
 
-        # Evaluate interviewees
         for interviewee in conversation['interviewees']:
             participant_id = interviewee['number']
             participant_flags = self.evaluate_participant_flags(conversation, participant_id, interviewee, current_time)
@@ -52,17 +47,14 @@ class AttentionFlagEvaluator:
         last_response_times = conversation.get('last_response_times', {})
         last_response = last_response_times.get(participant_id)
 
-        # Check no response
         if last_response and (current_time - last_response) > self.RESPONSE_THRESHOLD:
             participant_flags.add(AttentionFlag.NO_RESPONSE)
 
-        # Check missed scheduled meeting
         if participant.get('scheduled_slot'):
             meeting_time = datetime.fromisoformat(participant['scheduled_slot']['start_time'])
             if current_time > meeting_time and (current_time - meeting_time) < timedelta(hours=1):
                 participant_flags.add(AttentionFlag.MISSED_SCHEDULED_MEETING)
 
-        # Check no available slots
         if participant.get('state') == ConversationState.NO_SLOTS_AVAILABLE.value:
             participant_flags.add(AttentionFlag.NO_AVAILABLE_SLOTS)
 
@@ -70,14 +62,10 @@ class AttentionFlagEvaluator:
 
 
 class AttentionFlagHandler:
-    """
-    Handles the attention flags identified by the evaluator.
-    """
     def __init__(self, scheduler):
         self.scheduler = scheduler
 
     def handle_flags_for_conversation(self, conversation_id, flags_dict):
-        # Combine all flags
         all_flags = set()
         for fset in flags_dict.values():
             all_flags.update(fset)
@@ -110,45 +98,35 @@ class AttentionFlagHandler:
 
 class InterviewScheduler:
     def __init__(self):
-        self.conversations = {}  # In-memory conversations cache
+        self.conversations = {}  
         self.attention_manager = AttentionFlagManager()
         self.api_handler = ScheduleAPI()
         self.message_handler = MessageHandler(self)
-        self.mongodb_handler = MongoDBHandler(your_mongodb_uri, your_db_name)  # Initialize MongoDB handler
-        self.calendar_service = CalendarService()  # Initialize CalendarService
-        self.schedule_api = ScheduleAPI()  # Initialize ScheduleAPI
+        self.mongodb_handler = MongoDBHandler(your_mongodb_uri, your_db_name)
+        self.calendar_service = CalendarService()
+        self.schedule_api = ScheduleAPI()
 
         self.evaluator = AttentionFlagEvaluator()
         self.flag_handler = AttentionFlagHandler(self)
 
-        # Initialize conversation logger
         self.setup_conversation_logger()
 
     def check_attention_flags(self):
-        """Periodically check for attention flags that need to be raised"""
         current_time = datetime.now(pytz.UTC)
-        # Fetch all conversations from MongoDB
         conversations = self.mongodb_handler.get_all_conversations()
 
         for conversation in conversations:
             conversation_id = conversation['conversation_id']
-            # Update in-memory cache
             self.conversations[conversation_id] = conversation
 
-            # Evaluate flags for this conversation
             flags_dict = self.evaluator.evaluate_conversation_flags(conversation, current_time)
-
-            # Handle any triggered flags
             if flags_dict:
                 self.flag_handler.handle_flags_for_conversation(conversation_id, flags_dict)
 
     def notify_contact_person(self, conversation_id: str, flagged_participant_id: str, flag_type: AttentionFlag):
-        """This method is still used by some legacy calls, can forward to handle_flags_for_conversation if needed."""
-        # For backward compatibility, just handle a single flag
         self.flag_handler.notify_contact_person(conversation_id, {flag_type})
 
     def setup_conversation_logger(self):
-        """Setup a separate logger for conversation history"""
         self.conversation_logger = logging.getLogger('conversation_history')
         conversation_handler = logging.FileHandler('conversation_history.log')
         conversation_handler.setFormatter(
@@ -158,7 +136,6 @@ class InterviewScheduler:
         self.conversation_logger.setLevel(logging.INFO)
 
     def log_conversation_history(self, conversation_id: str):
-        """Log the entire conversation history"""
         try:
             conversation = self.conversations.get(conversation_id)
             if not conversation:
@@ -184,10 +161,10 @@ class InterviewScheduler:
                     'interviewer': conversation['interviewer']['state'],
                     'interviewees': [
                         {
-                            'number': interviewee['number'],
-                            'state': interviewee['state']
+                            'number': ie['number'],
+                            'state': ie['state']
                         }
-                        for interviewee in conversation['interviewees']
+                        for ie in conversation['interviewees']
                     ]
                 }
             }
@@ -208,128 +185,102 @@ class InterviewScheduler:
         role_to_contact_number: str,
         role_to_contact_email: str,
         company_details: str,
-        jd_title: str = ""  # New parameter with default empty string
+        jd_title: str = ""
     ) -> dict:
-        """
-        Create a dictionary containing participant information, including JD title.
-        """
-        try:
-            return {
-                'name': name,
-                'number': number,
-                'email': email,
-                'role': role,
-                'superior_flag': superior_flag,
-                'meeting_duration': meeting_duration,
-                'conversation_history': [],
-                'slots': None,
-                'state': ConversationState.AWAITING_AVAILABILITY.value,
-                'timezone': None,
-                'confirmed': False,
-                'role_to_contact_name': role_to_contact_name,
-                'role_to_contact_number': role_to_contact_number,
-                'role_to_contact_email': role_to_contact_email,
-                'company_details': company_details,
-                'confirmation_sent': False,
-                'scheduled_slot': None,
-                'out_of_context_count': 0,
-                'cancellation_count': 0,
-                'reschedule_count': 0,
-                'jd_title': jd_title  # Store JD title
-            }
-        except Exception as e:
-            logger.error(f"Error creating participant dictionary: {str(e)}")
-            raise
-
+        return {
+            'name': name,
+            'number': number,
+            'email': email,
+            'role': role,
+            'superior_flag': superior_flag,
+            'meeting_duration': meeting_duration,
+            'conversation_history': [],
+            'slots': None,
+            'state': ConversationState.AWAITING_AVAILABILITY.value,
+            'timezone': None,
+            'confirmed': False,
+            'role_to_contact_name': role_to_contact_name,
+            'role_to_contact_number': role_to_contact_number,
+            'role_to_contact_email': role_to_contact_email,
+            'company_details': company_details,
+            'confirmation_sent': False,
+            'scheduled_slot': None,
+            'out_of_context_count': 0,
+            'cancellation_count': 0,
+            'reschedule_count': 0,
+            'jd_title': jd_title
+        }
 
     def start_conversation(self, interviewer_name, interviewer_number, interviewer_email, interviewees_data, superior_flag, meeting_duration, role_to_contact_name, role_to_contact_number, role_to_contact_email, company_details) -> str:
-        """
-        Start a new conversation between an interviewer and multiple interviewees.
-        Returns the conversation_id.
-        """
-        try:
-            # Input validation
-            if not all([interviewer_number, interviewer_name]):
-                raise ValueError("Interviewer information must be provided")
+        if not all([interviewer_number, interviewer_name]):
+            raise ValueError("Interviewer information must be provided")
 
-            if not interviewees_data or not isinstance(interviewees_data, list):
-                raise ValueError("Interviewees information must be a non-empty list")
+        if not interviewees_data or not isinstance(interviewees_data, list):
+            raise ValueError("Interviewees information must be a non-empty list")
 
-            if not isinstance(meeting_duration, int) or int(meeting_duration) <= 0:
-                raise ValueError("Meeting duration must be a positive integer")
+        if not isinstance(meeting_duration, int) or int(meeting_duration) <= 0:
+            raise ValueError("Meeting duration must be a positive integer")
 
-            # Normalize phone numbers
-            interviewer_number = normalize_number(interviewer_number)
+        interviewer_number = normalize_number(interviewer_number)
 
-            # Create conversation ID using UUID
-            conversation_id = str(uuid.uuid4())
+        conversation_id = str(uuid.uuid4())
 
-            # Initialize conversation
-            interviewer = self._create_participant_dict(
-                name=interviewer_name,
-                number=interviewer_number,
-                email=interviewer_email,
-                role='interviewer',
+        interviewer = self._create_participant_dict(
+            name=interviewer_name,
+            number=interviewer_number,
+            email=interviewer_email,
+            role='interviewer',
+            superior_flag=superior_flag,
+            meeting_duration=meeting_duration,
+            role_to_contact_name=role_to_contact_name,
+            role_to_contact_number=role_to_contact_number,
+            role_to_contact_email=role_to_contact_email,
+            company_details=company_details
+        )
+
+        interviewees = []
+        for interviewee_data in interviewees_data:
+            interviewee = self._create_participant_dict(
+                name=interviewee_data['name'],
+                number=normalize_number(interviewee_data['number']),
+                email=interviewee_data['email'],
+                role='interviewee',
                 superior_flag=superior_flag,
                 meeting_duration=meeting_duration,
                 role_to_contact_name=role_to_contact_name,
                 role_to_contact_number=role_to_contact_number,
                 role_to_contact_email=role_to_contact_email,
-                company_details=company_details
+                company_details=company_details,
+                jd_title=interviewee_data['jd_title']
             )
+            interviewees.append(interviewee)
 
-            interviewees = []
-            for interviewee_data in interviewees_data:
-                interviewee = self._create_participant_dict(
-                    name=interviewee_data['name'],
-                    number=normalize_number(interviewee_data['number']),
-                    email=interviewee_data['email'],
-                    role='interviewee',
-                    superior_flag=superior_flag,
-                    meeting_duration=meeting_duration,
-                    role_to_contact_name=role_to_contact_name,
-                    role_to_contact_number=role_to_contact_number,
-                    role_to_contact_email=role_to_contact_email,
-                    company_details=company_details,
-                    jd_title=interviewee_data['jd_title']  # Pass jd_title here
-                )
-                interviewees.append(interviewee)
+        conversation_data = {
+            'conversation_id': conversation_id,
+            'interviewer': interviewer,
+            'interviewees': interviewees,
+            'alternate_slots_requested': False,
+            'created_at': datetime.now().isoformat(),
+            'scheduled_slots': [],
+            'role_to_contact_name': role_to_contact_name,
+            'role_to_contact_number': role_to_contact_number,
+            'role_to_contact_email': role_to_contact_email,
+            'company_details': company_details,
+            'available_slots': [],
+            'archived_slots': [],
+            'last_response_times': {}
+        }
 
-            conversation_data = {
-                'conversation_id': conversation_id,
-                'interviewer': interviewer,
-                'interviewees': interviewees,
-                'alternate_slots_requested': False,
-                'created_at': datetime.now().isoformat(),
-                'scheduled_slots': [],
-                'role_to_contact_name': role_to_contact_name,
-                'role_to_contact_number': role_to_contact_number,
-                'role_to_contact_email': role_to_contact_email,
-                'company_details': company_details,
-                'available_slots': [],
-                'archived_slots': [],
-                'last_response_times': {}
-            }
+        self.mongodb_handler.create_conversation(conversation_data)
 
-            # Insert the conversation into MongoDB
-            self.mongodb_handler.create_conversation(conversation_data)
+        self.conversations[conversation_id] = conversation_data
 
-            # Add to in-memory cache
-            self.conversations[conversation_id] = conversation_data
+        self.initiate_conversation_with_interviewer(conversation_id)
 
-            # Start conversation with the interviewer
-            self.initiate_conversation_with_interviewer(conversation_id)
+        logger.info(f"New conversation started: {conversation_id}")
+        self.log_conversation_history(conversation_id)
 
-            # Log the conversation initiation
-            logger.info(f"New conversation started: {conversation_id}")
-            self.log_conversation_history(conversation_id)
-
-            return conversation_id
-
-        except Exception as e:
-            logger.error(f"Error starting conversation: {str(e)}")
-            raise
-
+        return conversation_id
 
     def initiate_conversation_with_interviewer(self, conversation_id):
         conversation = self.conversations.get(conversation_id)
@@ -338,31 +289,20 @@ class InterviewScheduler:
             return
 
         interviewer = conversation['interviewer']
-        
-        # Extract interviewees who have agreed to take interviews
         interviewees = conversation.get('interviewees', [])
-        
+
         if not interviewees:
-            logger.warning(f"No interviewees found for conversation {conversation_id}.")
             candidates_info = "Currently, there are no candidates assigned for interviews."
         else:
-            # Log interviewee details for debugging
-            for ie in interviewees:
-                logger.debug(f"Interviewee: {ie['name']}, JD Title: {ie.get('jd_title', 'N/A')}")
-            
-            # Create a list of candidate names with their JD titles
             candidates_info_list = [
                 f"{interviewee['name']} (JD Title: {interviewee.get('jd_title', 'N/A')})"
                 for interviewee in interviewees
             ]
-            candidates_info = "Here are the candidates assigned with whom you will be taking an interview:\n" + "\n".join(candidates_info_list)
-            logger.info(f"Candidates Info: {candidates_info}")
+            candidates_info = "Here are the candidates assigned:\n" + "\n".join(candidates_info_list)
 
         system_message = f"""Hello {interviewer['name']}, I’m here to assist with scheduling interviews for the upcoming candidates. Could you please provide your availability for the coming week?
 
-Feel free to share any specific time preferences or constraints you may have. Once I have your availability, I’ll coordinate with the candidates and work to confirm convenient times for each interview.
-
-If there's anything specific you'd like me to keep in mind while setting up the meetings, just let me know! 
+Feel free to share any specific time preferences or constraints. Once I have your availability, I’ll coordinate with the candidates.
 
 ##Details about the interview - 
 {candidates_info}
@@ -379,7 +319,6 @@ Duration - {interviewer['meeting_duration']}
         self.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
         self.message_handler.send_message(interviewer['number'], response)
 
-
     def process_scheduling_for_interviewee(self, conversation_id, interviewee_number):
         conversation = self.conversations.get(conversation_id)
         if not conversation:
@@ -389,13 +328,11 @@ Duration - {interviewer['meeting_duration']}
         interviewer = conversation['interviewer']
         interviewer_slots = interviewer.get('slots', {})
 
-        # Find the interviewee
         interviewee = next((ie for ie in conversation['interviewees'] if ie['number'] == interviewee_number), None)
         if not interviewee:
             logger.error(f"Interviewee {interviewee_number} not found in conversation {conversation_id}.")
             return
 
-        # Initialize available_slots and archived_slots if not already done
         if not conversation.get('available_slots'):
             conversation['available_slots'] = interviewer_slots.get('time_slots', [])[:]
             self.conversations[conversation_id]['available_slots'] = conversation['available_slots']
@@ -403,27 +340,22 @@ Duration - {interviewer['meeting_duration']}
                 'available_slots': conversation['available_slots']
             })
 
-        # Prepare the list of slots to offer (excluding those already offered to this interviewee)
         offered_slots = interviewee.get('offered_slots', [])
         slots_to_offer = [slot for slot in conversation['available_slots'] if slot not in offered_slots]
 
         if not slots_to_offer and conversation.get('archived_slots'):
-            # Use archived slots if available
             slots_to_offer = [slot for slot in conversation['archived_slots'] if slot not in offered_slots]
 
         if not slots_to_offer:
-            # No more slots to offer
             asked_for_more_slots = conversation.get('asked_for_more_slots', False)
 
             if not asked_for_more_slots:
-                # Ask interviewer for more slots
                 conversation['asked_for_more_slots'] = True
                 self.conversations[conversation_id] = conversation
                 self.mongodb_handler.update_conversation(conversation_id, {
                     'asked_for_more_slots': True
                 })
 
-                # Set interviewee state to NO_SLOTS_AVAILABLE
                 interviewee['state'] = ConversationState.NO_SLOTS_AVAILABLE.value
                 self.conversations[conversation_id]['interviewees'] = [
                     ie if ie['number'] != interviewee_number else interviewee for ie in conversation['interviewees']
@@ -432,7 +364,6 @@ Duration - {interviewer['meeting_duration']}
                     'interviewees': conversation['interviewees']
                 })
 
-                # Ask the interviewer for more slots
                 system_message = (
                     f"Hello {interviewer['name']}, we have run out of available slots for some interviewees. "
                     f"Could you please provide more availability?"
@@ -447,16 +378,12 @@ Duration - {interviewer['meeting_duration']}
                 self.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                 self.message_handler.send_message(interviewer['number'], response)
 
-                # Mark interviewer state as AWAITING_MORE_SLOTS_FROM_INTERVIEWER
                 interviewer['state'] = ConversationState.AWAITING_MORE_SLOTS_FROM_INTERVIEWER.value
                 self.conversations[conversation_id]['interviewer'] = interviewer
                 self.mongodb_handler.update_conversation(conversation_id, {
                     'interviewer': interviewer
                 })
-
             else:
-                # Interviewer was already asked and presumably denied providing more slots
-                # Notify all remaining unscheduled interviewees
                 unscheduled_interviewees = [ie for ie in conversation['interviewees']
                                             if ie['state'] not in [ConversationState.SCHEDULED.value, ConversationState.CANCELLED.value]]
 
@@ -476,13 +403,11 @@ Duration - {interviewer['meeting_duration']}
                     self.message_handler.send_message(ie['number'], resp)
                     ie['state'] = ConversationState.NO_SLOTS_AVAILABLE.value
 
-                # Update interviewees in DB
                 self.conversations[conversation_id]['interviewees'] = conversation['interviewees']
                 self.mongodb_handler.update_conversation(conversation_id, {
                     'interviewees': conversation['interviewees']
                 })
 
-                # Notify interviewer
                 sys_msg = "No additional slots provided. We have informed the remaining interviewees that no slots are available."
                 resp = self.message_handler.generate_response(
                     interviewer,
@@ -494,12 +419,10 @@ Duration - {interviewer['meeting_duration']}
                 self.log_conversation(conversation_id, 'interviewer', "system", resp, "AI")
                 self.message_handler.send_message(interviewer['number'], resp)
 
-                # Notify role_to_contact_person
                 self.notify_contact_person(conversation_id, None, AttentionFlag.NO_AVAILABLE_SLOTS)
 
             return
 
-        # If we have slots_to_offer
         proposed_slot = slots_to_offer[0]
         if 'offered_slots' not in interviewee:
             interviewee['offered_slots'] = []
@@ -520,13 +443,11 @@ Duration - {interviewer['meeting_duration']}
             'interviewees': conversation['interviewees']
         })
 
-        # Localize meeting time to the interviewee's timezone
         interviewee_timezone = interviewee.get('timezone', 'UTC')
         meeting_time_utc = datetime.fromisoformat(proposed_slot['start_time'])
         localized_meeting_time = meeting_time_utc.astimezone(pytz.timezone(interviewee_timezone))
 
-        system_message = f"A proposed meeting time has been identified: {localized_meeting_time.strftime('%A, %B %d, %Y at %I:%M %p %Z')}. Please confirm if this works for you."
-
+        system_message = f"A proposed meeting time is: {localized_meeting_time.strftime('%A, %B %d, %Y at %I:%M %p %Z')}. Please confirm if this works."
         response = self.message_handler.generate_response(
             interviewee,
             interviewer,
@@ -537,9 +458,7 @@ Duration - {interviewer['meeting_duration']}
         self.log_conversation(conversation_id, interviewee_number, "system", response, "AI")
         self.message_handler.send_message(interviewee['number'], response)
 
-
     def finalize_scheduling_for_interviewee(self, conversation_id, interviewee_number):
-        """Finalize the scheduling after interviewee has confirmed."""
         conversation = self.conversations.get(conversation_id)
         if not conversation:
             logger.error(f"Conversation {conversation_id} not found for finalizing scheduling.")
@@ -555,11 +474,9 @@ Duration - {interviewer['meeting_duration']}
         try:
             meeting_time_utc = datetime.fromisoformat(interviewee['proposed_slot']['start_time'])
 
-            # Store the scheduled slot and update conversation state
             interviewee['scheduled_slot'] = interviewee['proposed_slot']
             interviewee['state'] = ConversationState.SCHEDULED.value
 
-            # Remove the scheduled slot from available_slots
             if interviewee['proposed_slot'] in conversation['available_slots']:
                 conversation['available_slots'].remove(interviewee['proposed_slot'])
                 self.conversations[conversation_id]['available_slots'] = conversation['available_slots']
@@ -574,39 +491,24 @@ Duration - {interviewer['meeting_duration']}
                 'interviewees': conversation['interviewees']
             })
 
-            # Send confirmation messages to both interviewer and interviewee
             for participant in [interviewer, interviewee]:
+                participant_timezone = participant.get('timezone', 'UTC')
                 try:
-                    # Default to UTC if timezone is None or invalid
-                    participant_timezone = participant.get('timezone', 'UTC')
-                    if not participant_timezone:
-                        participant_timezone = 'UTC'
-                        logger.warning(f"No timezone set for participant {participant['number']}, defaulting to UTC")
-                    
-                    try:
-                        tz = pytz.timezone(participant_timezone)
-                    except pytz.exceptions.UnknownTimeZoneError:
-                        logger.warning(f"Invalid timezone {participant_timezone} for participant {participant['number']}, defaulting to UTC")
-                        tz = pytz.UTC
-                    
-                    localized_meeting_time = meeting_time_utc.astimezone(tz)
-                    system_message = f"Your meeting has been scheduled for {localized_meeting_time.strftime('%A, %B %d, %Y at %I:%M %p %Z')}."
+                    tz = pytz.timezone(participant_timezone)
+                except pytz.exceptions.UnknownTimeZoneError:
+                    tz = pytz.UTC
+                localized_meeting_time = meeting_time_utc.astimezone(tz)
+                system_message = f"Your meeting is scheduled for {localized_meeting_time.strftime('%A, %B %d, %Y at %I:%M %p %Z')}."
+                response = self.message_handler.generate_response(
+                    participant,
+                    interviewer if participant['role'] == 'interviewee' else interviewee,
+                    "",
+                    system_message,
+                    conversation_state=participant['state']
+                )
+                self.log_conversation(conversation_id, participant['number'], "system", response, "AI")
+                self.message_handler.send_message(participant['number'], response)
 
-                    response = self.message_handler.generate_response(
-                        participant,
-                        interviewer if participant['role'] == 'interviewee' else interviewee,
-                        "",
-                        system_message,
-                        conversation_state=participant['state']
-                    )
-                    self.log_conversation(conversation_id, participant['number'], "system", response, "AI")
-                    self.message_handler.send_message(participant['number'], response)
-                
-                except Exception as e:
-                    logger.error(f"Error sending confirmation to participant {participant['number']}: {str(e)}")
-                    # Continue with other participant if one fails
-
-            # Clear confirmation flags
             interviewee['confirmed'] = False
             interviewee['proposed_slot'] = None
             self.conversations[conversation_id]['interviewees'] = [
@@ -616,7 +518,6 @@ Duration - {interviewer['meeting_duration']}
                 'interviewees': conversation['interviewees']
             })
 
-            # Add the scheduled slot to scheduled_slots
             if 'scheduled_slots' not in conversation:
                 conversation['scheduled_slots'] = []
             conversation['scheduled_slots'].append(interviewee['scheduled_slot'])
@@ -625,7 +526,6 @@ Duration - {interviewer['meeting_duration']}
                 'scheduled_slots': conversation['scheduled_slots']
             })
 
-            # Create Google Calendar Event
             event_result = self.api_handler.post_to_create_event(conversation_id, interviewee_number)
             logger.info(f"event_result: {event_result}")
             if event_result:
@@ -640,11 +540,9 @@ Duration - {interviewer['meeting_duration']}
                 self.mongodb_handler.update_conversation(conversation_id, {
                     'interviewees': conversation['interviewees']
                 })
-                logger.info(f"Event created for conversation {conversation_id} and interviewee {interviewee_number}.")
             else:
                 logger.error(f"Failed to create event for conversation {conversation_id} and interviewee {interviewee_number}.")
 
-            # Initiate next interviewee if available
             self.initiate_next_interviewee(conversation_id)
 
         except Exception as e:
@@ -657,7 +555,6 @@ Duration - {interviewer['meeting_duration']}
             logger.error(f"Conversation {conversation_id} not found for initiating next interviewee.")
             return
 
-        # Find the next interviewee who hasn't been scheduled and hasn't been contacted yet
         for interviewee in conversation['interviewees']:
             if interviewee['state'] == ConversationState.AWAITING_AVAILABILITY.value:
                 self.message_handler.initiate_conversation_with_interviewee(conversation_id, interviewee['number'])
@@ -681,7 +578,6 @@ Duration - {interviewer['meeting_duration']}
             log_entry = f"{sender}: {message_type.capitalize()}: {message}"
             participant_history = participant.get('conversation_history', [])
             participant_history.append(log_entry)
-            # Update participant's conversation history in the database
             if participant_id == 'interviewer':
                 self.mongodb_handler.update_conversation(conversation_id, {
                     f'interviewer.conversation_history': participant_history
@@ -699,6 +595,71 @@ Duration - {interviewer['meeting_duration']}
         except Exception as e:
             logger.error(f"Error logging conversation: {str(e)}")
 
+    def change_meeting_duration(self, conversation_id: str, new_duration: int):
+        """
+        Change the meeting duration for the conversation.
+        - Update interviewer and all interviewees meeting_duration.
+        - Resize all available_slots and scheduled_slots.
+        - Update all scheduled Google Calendar events accordingly.
+        """
+        if new_duration <= 0:
+            raise ValueError("Meeting duration must be positive.")
+
+        conversation = self.conversations.get(conversation_id)
+        if not conversation:
+            logger.error(f"Conversation {conversation_id} not found for changing meeting duration.")
+            return False
+
+        # Update meeting_duration for interviewer
+        conversation['interviewer']['meeting_duration'] = new_duration
+        
+        # Update meeting_duration for each interviewee
+        for ie in conversation['interviewees']:
+            ie['meeting_duration'] = new_duration
+
+        # Resize available_slots
+        # Assuming available_slots have a start_time and we must recalculate end_time based on new_duration
+        for slot in conversation['available_slots']:
+            start_dt = datetime.fromisoformat(slot['start_time'])
+            # Adjust end_time according to new duration
+            end_dt = start_dt + timedelta(minutes=new_duration)
+            slot['end_time'] = end_dt.isoformat()
+
+        # Resize archived_slots similarly
+        for slot in conversation['archived_slots']:
+            start_dt = datetime.fromisoformat(slot['start_time'])
+            end_dt = start_dt + timedelta(minutes=new_duration)
+            slot['end_time'] = end_dt.isoformat()
+
+        # Resize scheduled_slots and update events in Google Calendar
+        for scheduled_slot in conversation.get('scheduled_slots', []):
+            start_dt = datetime.fromisoformat(scheduled_slot['start_time'])
+            end_dt = start_dt + timedelta(minutes=new_duration)
+            scheduled_slot['end_time'] = end_dt.isoformat()
+
+        # Update MongoDB with changed duration and slots
+        self.mongodb_handler.update_conversation(conversation_id, {
+            'interviewer': conversation['interviewer'],
+            'interviewees': conversation['interviewees'],
+            'available_slots': conversation['available_slots'],
+            'archived_slots': conversation['archived_slots'],
+            'scheduled_slots': conversation.get('scheduled_slots', [])
+        })
+
+        # Update each scheduled event in Google Calendar
+        for ie in conversation['interviewees']:
+            if ie.get('state') == ConversationState.SCHEDULED.value and ie.get('scheduled_slot') and ie.get('event_id'):
+                event_id = ie['event_id']
+                start_dt = datetime.fromisoformat(ie['scheduled_slot']['start_time'])
+                end_dt = start_dt + timedelta(minutes=new_duration)
+                ie['scheduled_slot']['end_time'] = end_dt.isoformat()
+                update_success = self.calendar_service.update_event(conversation_id, event_id, start_dt.isoformat(), end_dt.isoformat())
+                if not update_success:
+                    logger.error(f"Failed to update event {event_id} in conversation {conversation_id}.")
+
+        self.conversations[conversation_id] = conversation
+        logger.info(f"Meeting duration changed to {new_duration} for conversation {conversation_id}.")
+        return True
 
 
 scheduler = InterviewScheduler()

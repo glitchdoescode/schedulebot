@@ -270,6 +270,152 @@ Answer the participant's question in a professional and concise manner.
 
             # Return correction if any, else an empty string
         return " ".join(corrections) if corrections else ""
+    
+    def extract_slot_info(self, user_message, available_slots):
+        """
+        Extract slot information (start_time and end_time) from the user message.
+
+        Args:
+            user_message (str): The user's natural language message.
+
+        Returns:
+            dict: A dictionary containing 'start_time' and 'end_time' if extraction is successful, else None.
+        """
+        try:
+            json1="""
+                {{
+                        "start_time": "YYYY-MM-DDTHH:MM:SS",
+                        "end_time": "YYYY-MM-DDTHH:MM:SS"
+                }}
+            """
+            PROMPT_TEMPLATE = f"""
+                Extract the slot information from the following message.
+
+                **Input Message**:
+                {user_message}
+
+                **Available Slots for reference**
+                {available_slots}
+
+                **Output Format (dont include anything in the output other than json)**:
+                {json1}
+            """
+
+            prompt = PromptTemplate(
+                input_variables=['user_message'],
+                template=PROMPT_TEMPLATE
+            )
+
+            llm_model = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                temperature=0.3,
+            )
+
+            chain = prompt | llm_model
+
+            response = chain.invoke({'user_message': user_message})
+            llm_output = response.content.strip()
+
+            logger.info(f"Extracted slot info response: {llm_output}")
+
+            # Extract JSON from the response
+            parsed_data = self.extract_json_from_response(llm_output)
+
+            if not parsed_data:
+                logger.error("Failed to extract slot information from the response.")
+                return None
+
+            # Validate the extracted data
+            if 'start_time' not in parsed_data or 'end_time' not in parsed_data:
+                logger.error("Extracted slot information is incomplete.")
+                return None
+
+            # Optionally, validate the datetime format
+            try:
+                datetime.fromisoformat(parsed_data['start_time'])
+                datetime.fromisoformat(parsed_data['end_time'])
+            except ValueError:
+                logger.error("Extracted datetime format is invalid.")
+                return None
+
+            return parsed_data
+
+        except Exception as e:
+            logger.error(f"Error in extract_slot_info: {str(e)}")
+            return None
+
+    def extract_slot_info_for_update(self, user_message, available_slots):
+        """
+        Extract slot information (old_start_time and new_start_time) from the user message for updating a slot.
+
+        Args:
+            user_message (str): The user's natural language message.
+
+        Returns:
+            dict: A dictionary containing 'old_start_time' and 'new_start_time' if extraction is successful, else None.
+        """
+        try:
+            json1="""
+                {{
+                    "old_start_time": "YYYY-MM-DDTHH:MM:SS",
+                    "new_start_time": "YYYY-MM-DDTHH:MM:SS"
+                }}
+            """
+            PROMPT_TEMPLATE = f"""
+                Extract the slot information for updating from the following message.
+
+                **Input Message**:
+                {user_message}
+
+                **Available Slots for reference**
+                {available_slots}
+
+                **Output Format**:
+                {json1}
+            """
+
+            prompt = PromptTemplate(
+                input_variables=['user_message'],
+                template=PROMPT_TEMPLATE
+            )
+
+            llm_model = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                temperature=0.3,
+            )
+
+            chain = prompt | llm_model
+
+            response = chain.invoke({'user_message': user_message})
+            llm_output = response.content.strip()
+
+            logger.info(f"Extracted slot update info response: {llm_output}")
+
+            # Extract JSON from the response
+            parsed_data = self.extract_json_from_response(llm_output)
+
+            if not parsed_data:
+                logger.error("Failed to extract slot update information from the response.")
+                return None
+
+            # Validate the extracted data
+            if 'old_start_time' not in parsed_data or 'new_start_time' not in parsed_data:
+                logger.error("Extracted slot update information is incomplete.")
+                return None
+
+            # Optionally, validate the datetime format
+            try:
+                datetime.fromisoformat(parsed_data['old_start_time'])
+                datetime.fromisoformat(parsed_data['new_start_time'])
+            except ValueError:
+                logger.error("Extracted datetime format is invalid.")
+                return None
+
+            return parsed_data
+
+        except Exception as e:
+            logger.error(f"Error in extract_slot_info_for_update: {str(e)}")
+            return None
 
     
     def generate_conversational_message(self, participant_name, participant_number, participant_email, participant_role, superior_flag, meeting_duration, role_to_contact_name, role_to_contact_number, role_to_contact_email, company_details, conversation_history, conversation_state, user_message, system_message, other_participant_conversation_history):
@@ -580,3 +726,64 @@ d database
                 'is_relevant': True,
                 'context_type': 'scheduling'
             }
+        
+    def extract_meeting_duration(self, user_message):
+        """
+        Extract the meeting duration (in minutes) from the user's message.
+        
+        Expected Output Format:
+        ```json
+        {
+            "meeting_duration": 30
+        }
+        ```
+        """
+        try:
+            json_template = """
+                {{
+                    "meeting_duration": 30
+                }}
+            """
+            PROMPT_TEMPLATE = f"""
+                Extract the meeting duration in minutes from the following message:
+                "{user_message}"
+
+                The output should be a JSON in the format:
+                ```json
+                {json_template}
+                ```
+                where "meeting_duration" is an integer representing the duration in minutes.
+            """
+
+            prompt = PromptTemplate(
+                input_variables=['user_message'],
+                template=PROMPT_TEMPLATE
+            )
+
+            llm_model = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                temperature=0.3,
+            )
+
+            chain = prompt | llm_model
+            response = chain.invoke({'user_message': user_message})
+            llm_output = response.content.strip()
+
+            logger.info(f"Extracted meeting duration response: {llm_output}")
+
+            parsed_data = self.extract_json_from_response(llm_output)
+
+            if not parsed_data or 'meeting_duration' not in parsed_data:
+                logger.error("Failed to extract meeting duration from the response.")
+                return None
+
+            duration = parsed_data['meeting_duration']
+            if not isinstance(duration, int) or duration <= 0:
+                logger.error("Meeting duration is not a positive integer.")
+                return None
+
+            return duration
+
+        except Exception as e:
+            logger.error(f"Error in extract_meeting_duration: {str(e)}")
+            return None

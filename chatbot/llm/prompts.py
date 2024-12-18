@@ -149,31 +149,76 @@ Using the variables provided, generate a response to the participant's message t
     - **RESCHEDULE_REQUESTED**: The participant wants to reschedule the meeting but has not yet suggested new timing or confirmed availability. **This intent applies only if the participant explicitly asks to reschedule**.
       - Example: User: "Can we reschedule the meeting?"
 
-    - **NONE**: This intent is used if the message does not fall under "CANCELLATION_REQUESTED," "QUERY," or "RESCHEDULE_REQUESTED," indicating the conversation is in a regular, undefined state.
+    - **SLOT_ADD_REQUESTED**: The participant requests to add a new available time slot for scheduling interviews.
+      - Example: User: "I'd like to add Wednesday afternoon as an available slot."
+
+    - **SLOT_REMOVE_REQUESTED**: The participant requests to remove an existing available time slot.
+      - Example: User: "Please remove the slot on Friday morning."
+
+    - **SLOT_UPDATE_REQUESTED**: The participant requests to update the details of an existing available time slot.
+      - Example: User: "Can we change the Thursday slot from 2 PM to 3 PM?"
+
+    - **MEETING_DURATION_CHANGE_REQUESTED**: The participant requests to change the duration of the meetings.
+      - Example: User: "Let's change the interview duration from 30 minutes to 45 minutes."
+
+    - **NONE**: This intent is used if the message does not fall under "CANCELLATION_REQUESTED," "QUERY," "RESCHEDULE_REQUESTED," "SLOT_ADD_REQUESTED," "SLOT_REMOVE_REQUESTED," "SLOT_UPDATE_REQUESTED," or "MEETING_DURATION_CHANGE_REQUESTED," indicating the conversation is in a regular, undefined state.
       - Example: User: "I’m available for the meeting next Tuesday." | Chatbot: "Thanks! I’ll confirm the time shortly."
 
 3. **Participant Role Rules**:
     - If the **Participant Role** is "Interviewer":
-        - They can provide their availability for rescheduling.
-        - If the message reflects this without explicitly requesting a reschedule, classify the intent as **NONE**.
+        - They can provide their availability for rescheduling, add, remove, or update available slots, and change meeting durations.
+        - If the message reflects any of these actions explicitly, classify accordingly.
+        - If the message reflects availability without explicit requests to reschedule or modify slots, classify the intent as **NONE**.
     - If the **Participant Role** is "Interviewee":
-        - They do not provide availability for rescheduling.
+        - They do not provide availability for rescheduling or modify slots.
         - If the message reflects a decline of a proposed time without an explicit request to reschedule, classify the intent as **NONE**.
 
 4. **Important Notes**:
-    - User Message has more priority over conversation history.
-    - If the user message is a query (e.g., "which Saturday?"), classify it as **QUERY**; otherwise, classify it as **NONE**.
-    - **CANCELLATION_REQUESTED** should be classified only if the participant explicitly requests cancellation.
-    - **RESCHEDULE_REQUESTED** should be classified only if the participant explicitly requests to reschedule. Declining a proposed time without further mention of rescheduling should not trigger this intent.
-    - Use **NONE** when there are no queries, cancellation requests, or explicit reschedule requests, reflecting a neutral or ongoing conversation state.
+    - **User Message has more priority over conversation history.**
+    - **Explicit Requests Take Precedence**: Only classify intents like **CANCELLATION_REQUESTED**, **RESCHEDULE_REQUESTED**, **SLOT_ADD_REQUESTED**, **SLOT_REMOVE_REQUESTED**, **SLOT_UPDATE_REQUESTED**, and **MEETING_DURATION_CHANGE_REQUESTED** if the participant explicitly makes such requests.
+    - **Handling Queries**: If the user message is a query (e.g., "which Saturday?"), classify it as **QUERY**; otherwise, classify it as **NONE**.
+    - **CANCELLATION_REQUESTED**: Classify only if the participant explicitly requests cancellation.
+    - **RESCHEDULE_REQUESTED**: Classify only if the participant explicitly requests to reschedule.
+    - **SLOT_ADD_REQUESTED**, **SLOT_REMOVE_REQUESTED**, **SLOT_UPDATE_REQUESTED**: Classify only if the participant explicitly requests to add, remove, or update slots.
+    - **MEETING_DURATION_CHANGE_REQUESTED**: Classify only if the participant explicitly requests to change the meeting duration.
+    - Use **NONE** when there are no queries, cancellation requests, explicit reschedule requests, or slot modifications, reflecting a neutral or ongoing conversation state.
 
 5. **Output Format**:
    - Output only the identified **Current Intent** in this format:
 
    **Current Intent**: [Determined_Intent]
 
-**Example Output**:
+**Example Outputs**:
 
-**Current Intent**: QUERY
+1. **CANCELLATION_REQUESTED**
 
+   **Current Intent**: CANCELLATION_REQUESTED
+
+2. **QUERY**
+
+   **Current Intent**: QUERY
+
+3. **RESCHEDULE_REQUESTED**
+
+   **Current Intent**: RESCHEDULE_REQUESTED
+
+4. **SLOT_ADD_REQUESTED**
+
+   **Current Intent**: SLOT_ADD_REQUESTED
+
+5. **SLOT_REMOVE_REQUESTED**
+
+   **Current Intent**: SLOT_REMOVE_REQUESTED
+
+6. **SLOT_UPDATE_REQUESTED**
+
+   **Current Intent**: SLOT_UPDATE_REQUESTED
+
+7. **MEETING_DURATION_CHANGE_REQUESTED**
+
+   **Current Intent**: MEETING_DURATION_CHANGE_REQUESTED
+
+8. **NONE**
+
+   **Current Intent**: NONE
 """
