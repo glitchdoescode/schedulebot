@@ -201,12 +201,13 @@ def twilio_webhook() -> Response:
         logger.error("MessageSid missing in request.")
         return Response("Missing MessageSid", status=400)
 
-    if message_sid in app.config.get('PROCESSED_SIDS', set()):
+    if 'PROCESSED_SIDS' not in app.config:
+        app.config['PROCESSED_SIDS'] = set()
+
+    if message_sid in app.config['PROCESSED_SIDS']:
         logger.info(f"Duplicate request detected for MessageSid: {message_sid}")
         return Response("Duplicate request", status=200)
 
-    if 'PROCESSED_SIDS' not in app.config:
-        app.config['PROCESSED_SIDS'] = set()
     app.config['PROCESSED_SIDS'].add(message_sid)
 
     proto = request.headers.get('X-Forwarded-Proto', request.scheme)
@@ -431,32 +432,42 @@ def auth_schedule(conversation_id: str) -> Response:
 @app.route('/api/conversations/active', methods=['GET'])
 @require_api_key
 def get_active_conversations():
-    print("Received request for active conversations") 
-    print("Headers:", request.headers)  
+    logger.info("Received request for active conversations")
     try:
+        all_conversations = scheduler.mongodb_handler.get_all_conversations()
         active_conversations = []
-        for conversation in scheduler.conversations.values():
-            if any(ie['state'] != ConversationState.SCHEDULED.value 
-                  and ie['state'] != ConversationState.CANCELLED.value 
-                  for ie in conversation['interviewees']):
+
+        for conversation in all_conversations:
+            conversation_id = conversation['conversation_id']
+            interviewer = conversation['interviewer']
+            interviewees = conversation.get('interviewees', [])
+
+            # Check if any interviewee is not SCHEDULED or CANCELLED
+            active = any(
+                ie['state'] not in [ConversationState.SCHEDULED.value, ConversationState.CANCELLED.value]
+                for ie in interviewees
+            )
+
+            if active:
                 active_conversations.append({
-                    'id': conversation['conversation_id'],
-                    'interviewer_name': conversation['interviewer']['name'],
-                    'interviewer_email': conversation['interviewer']['email'],
-                    'interviewer_number': conversation['interviewer']['number'],
+                    'id': conversation_id,
+                    'interviewer_name': interviewer['name'],
+                    'interviewer_email': interviewer['email'],
+                    'interviewer_number': interviewer['number'],
                     'interviewees': [{
                         'id': str(idx),
                         'name': ie['name'],
                         'email': ie['email'],
                         'number': ie['number'],
                         'status': ie['state']
-                    } for idx, ie in enumerate(conversation['interviewees'])],
+                    } for idx, ie in enumerate(interviewees)],
                     'status': 'active',
                     'last_activity': conversation.get('last_response_times', {}).get(
-                        conversation['interviewer']['number'],
-                        datetime.now().isoformat()
+                        interviewer['number'],
+                        datetime.utcnow().isoformat()
                     )
                 })
+
         return jsonify(active_conversations), 200
     except Exception as e:
         logger.error(f"Error fetching active conversations: {str(e)}")
@@ -466,23 +477,29 @@ def get_active_conversations():
 @require_api_key
 def get_scheduled_interviews():
     try:
+        all_conversations = scheduler.mongodb_handler.get_all_conversations()
         scheduled_interviews = []
-        for conversation in scheduler.conversations.values():
-            for interviewee in conversation['interviewees']:
+
+        for conversation in all_conversations:
+            interviewer = conversation['interviewer']
+            interviewees = conversation.get('interviewees', [])
+
+            for interviewee in interviewees:
                 if (interviewee['state'] == ConversationState.SCHEDULED.value 
                     and interviewee.get('scheduled_slot')):
                     scheduled_interviews.append({
                         'id': str(uuid.uuid4()),
                         'title': f"Interview with {interviewee['name']}",
-                        'interviewer_name': conversation['interviewer']['name'],
-                        'interviewer_email': conversation['interviewer']['email'],
-                        'interviewer_number': conversation['interviewer']['number'],
+                        'interviewer_name': interviewer['name'],
+                        'interviewer_email': interviewer['email'],
+                        'interviewer_number': interviewer['number'],
                         'interviewee_name': interviewee['name'],
                         'interviewee_email': interviewee['email'],
                         'interviewee_number': interviewee['number'],
                         'scheduled_time': interviewee['scheduled_slot']['start_time'],
                         'status': 'scheduled'
                     })
+
         return jsonify(scheduled_interviews), 200
     except Exception as e:
         logger.error(f"Error fetching scheduled interviews: {str(e)}")
@@ -492,22 +509,25 @@ def get_scheduled_interviews():
 @require_api_key
 def get_attention_flags():
     try:
+        all_conversations = scheduler.mongodb_handler.get_all_conversations()
         flags = []
         current_time = datetime.now(pytz.UTC)
-        for conversation in scheduler.conversations.values():
-            flags_dict = scheduler.evaluator.evaluate_conversation_flags(
-                conversation, current_time
-            )
+
+        for conversation in all_conversations:
+            conversation_id = conversation['conversation_id']
+            evaluator = scheduler.evaluator
+            flags_dict = evaluator.evaluate_conversation_flags(conversation, current_time)
             for participant_id, participant_flags in flags_dict.items():
                 for flag in participant_flags:
                     flags.append({
                         'id': str(uuid.uuid4()),
-                        'conversation_id': conversation['conversation_id'],
+                        'conversation_id': conversation_id,
                         'message': f"Attention required for {participant_id}: {flag.value}",
                         'severity': 'high',
-                        'created_at': datetime.now().isoformat(),
-                        'resolved': False
+                        'created_at': flag.timestamp.isoformat(),
+                        'resolved': flag.resolved
                     })
+
         return jsonify(flags), 200
     except Exception as e:
         logger.error(f"Error fetching attention flags: {str(e)}")
@@ -516,7 +536,21 @@ def get_attention_flags():
 @app.route('/api/attention-flags/<flag_id>/resolve', methods=['POST'])
 @require_api_key
 def resolve_attention_flag(flag_id):
+    # **Note:** Since AttentionFlagManager currently stores flags in memory,
+    # resolving a flag by its ID isn't directly possible. To fully implement
+    # this feature, consider refactoring AttentionFlagManager to store flags
+    # in MongoDB with unique IDs.
+    #
+    # For now, this endpoint will return a success message without actual resolution.
+    #
+    # Future Implementation:
+    # 1. Store each flag with a unique ID in MongoDB.
+    # 2. Update the 'resolved' status of the flag in the database.
+    # 3. Modify the AttentionFlagManager to interact with the database.
+    
     try:
+        # Placeholder implementation
+        logger.info(f"Flag {flag_id} resolved (placeholder implementation).")
         return jsonify({'message': 'Flag resolved successfully'}), 200
     except Exception as e:
         logger.error(f"Error resolving attention flag: {str(e)}")

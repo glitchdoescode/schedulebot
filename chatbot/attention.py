@@ -1,5 +1,3 @@
-# chatbot/attention.py
-
 from datetime import datetime, timedelta
 import pytz
 from typing import List, Dict
@@ -9,10 +7,10 @@ class AttentionFlagManager:
     def __init__(self):
         self.flags = {}  # conversation_id -> {participant_id -> [flags]}
         self.response_timeouts = {}  # conversation_id -> {participant_id -> last_response_time}
-        self.RESPONSE_THRESHOLD = timedelta(hours=24)  # Time threshold for no response
-        self.RESCHEDULE_THRESHOLD = 3  # Maximum number of reschedule requests
-        self.CANCELLATION_THRESHOLD = 2  # Maximum number of cancellations
-        self.OUT_OF_CONTEXT_THRESHOLD = 5  # Maximum number of out-of-context messages
+        self.RESPONSE_THRESHOLD = timedelta(hours=24)
+        self.RESCHEDULE_THRESHOLD = 3
+        self.CANCELLATION_THRESHOLD = 2
+        self.OUT_OF_CONTEXT_THRESHOLD = 5
 
     def add_flag(self, conversation_id: str, participant_id: str, flag_type: AttentionFlag):
         if conversation_id not in self.flags:

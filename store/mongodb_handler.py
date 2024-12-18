@@ -97,3 +97,24 @@ class MongoDBHandler:
         except Exception as e:
             logger.error(f"Error deleting past conversations from MongoDB: {e}")
             raise
+    def find_conversation_by_number(self, number: str):
+        """
+        Finds a single conversation that involves the given phone number, either as an interviewer or interviewee.
+        Returns the conversation document if found, otherwise None.
+        """
+        try:
+            conversation = self.conversations.find_one({
+                '$or': [
+                    {'interviewer.number': number},
+                    {'interviewees.number': number}
+                ]
+            })
+            if conversation:
+                logger.info(f"Found conversation containing number: {number}")
+            else:
+                logger.warning(f"No conversation found containing number: {number}")
+            return conversation
+        except Exception as e:
+            logger.error(f"Error retrieving conversation by number {number} from MongoDB: {e}")
+            raise
+

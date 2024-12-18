@@ -1,21 +1,22 @@
 # chatbot/conversation.py
-
 from datetime import datetime, timedelta
 import pytz
 import logging
 import json
 import os
+import traceback
+import uuid
+from typing import Optional, Dict, Any
+
 from .attention import AttentionFlagManager
 from .schedule_api import ScheduleAPI
 from .message_handler import MessageHandler
 from chatbot.utils import normalize_number
 from chatbot.constants import ConversationState, AttentionFlag
 from dotenv import load_dotenv
-import traceback
 from store.mongodb_handler import MongoDBHandler
 from calendar_module.calendar_service import CalendarService
 from chatbot.schedule_api import ScheduleAPI
-import uuid  # Added for UUID generation
 
 load_dotenv()
 
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 class AttentionFlagEvaluator:
     RESPONSE_THRESHOLD = timedelta(hours=24)
 
-    def evaluate_conversation_flags(self, conversation, current_time):
+    def evaluate_conversation_flags(self, conversation: Dict[str, Any], current_time: datetime):
         flags = {}
         interviewer = conversation['interviewer']
         interviewer_flags = self.evaluate_participant_flags(conversation, 'interviewer', interviewer, current_time)
@@ -42,7 +43,7 @@ class AttentionFlagEvaluator:
 
         return flags
 
-    def evaluate_participant_flags(self, conversation, participant_id, participant, current_time):
+    def evaluate_participant_flags(self, conversation: Dict[str, Any], participant_id: str, participant: Dict[str, Any], current_time: datetime):
         participant_flags = set()
         last_response_times = conversation.get('last_response_times', {})
         last_response = last_response_times.get(participant_id)
@@ -73,7 +74,7 @@ class AttentionFlagHandler:
         if all_flags:
             self.notify_contact_person(conversation_id, all_flags)
 
-    def notify_contact_person(self, conversation_id, flags):
+    def notify_contact_person(self, conversation_id: str, flags):
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         if not conversation:
             logger.error(f"Conversation {conversation_id} not found for notifying contact person.")
@@ -98,7 +99,6 @@ class AttentionFlagHandler:
 
 class InterviewScheduler:
     def __init__(self):
-        self.conversations = {}  
         self.attention_manager = AttentionFlagManager()
         self.api_handler = ScheduleAPI()
         self.message_handler = MessageHandler(self)
@@ -117,13 +117,11 @@ class InterviewScheduler:
 
         for conversation in conversations:
             conversation_id = conversation['conversation_id']
-            self.conversations[conversation_id] = conversation
-
             flags_dict = self.evaluator.evaluate_conversation_flags(conversation, current_time)
             if flags_dict:
                 self.flag_handler.handle_flags_for_conversation(conversation_id, flags_dict)
 
-    def notify_contact_person(self, conversation_id: str, flagged_participant_id: str, flag_type: AttentionFlag):
+    def notify_contact_person(self, conversation_id: str, flagged_participant_id: Optional[str], flag_type: AttentionFlag):
         self.flag_handler.notify_contact_person(conversation_id, {flag_type})
 
     def setup_conversation_logger(self):
@@ -137,7 +135,7 @@ class InterviewScheduler:
 
     def log_conversation_history(self, conversation_id: str):
         try:
-            conversation = self.conversations.get(conversation_id)
+            conversation = self.mongodb_handler.get_conversation(conversation_id)
             if not conversation:
                 logger.error(f"Conversation {conversation_id} not found for logging history.")
                 return
@@ -272,18 +270,13 @@ class InterviewScheduler:
         }
 
         self.mongodb_handler.create_conversation(conversation_data)
-
-        self.conversations[conversation_id] = conversation_data
-
         self.initiate_conversation_with_interviewer(conversation_id)
-
         logger.info(f"New conversation started: {conversation_id}")
         self.log_conversation_history(conversation_id)
-
         return conversation_id
 
     def initiate_conversation_with_interviewer(self, conversation_id):
-        conversation = self.conversations.get(conversation_id)
+        conversation = self.mongodb_handler.get_conversation(conversation_id)
         if not conversation:
             logger.error(f"Conversation {conversation_id} not found for initiation.")
             return
@@ -320,25 +313,22 @@ Duration - {interviewer['meeting_duration']}
         self.message_handler.send_message(interviewer['number'], response)
 
     def process_scheduling_for_interviewee(self, conversation_id, interviewee_number):
-        conversation = self.conversations.get(conversation_id)
+        conversation = self.mongodb_handler.get_conversation(conversation_id)
         if not conversation:
             logger.error(f"Conversation {conversation_id} not found for scheduling.")
             return
 
         interviewer = conversation['interviewer']
-        interviewer_slots = interviewer.get('slots', {})
-
         interviewee = next((ie for ie in conversation['interviewees'] if ie['number'] == interviewee_number), None)
         if not interviewee:
             logger.error(f"Interviewee {interviewee_number} not found in conversation {conversation_id}.")
             return
 
+        interviewer_slots = interviewer.get('slots', {})
         if not conversation.get('available_slots'):
-            conversation['available_slots'] = interviewer_slots.get('time_slots', [])[:]
-            self.conversations[conversation_id]['available_slots'] = conversation['available_slots']
-            self.mongodb_handler.update_conversation(conversation_id, {
-                'available_slots': conversation['available_slots']
-            })
+            available_slots = interviewer_slots.get('time_slots', [])
+            self.mongodb_handler.update_conversation(conversation_id, {'available_slots': available_slots})
+            conversation = self.mongodb_handler.get_conversation(conversation_id)
 
         offered_slots = interviewee.get('offered_slots', [])
         slots_to_offer = [slot for slot in conversation['available_slots'] if slot not in offered_slots]
@@ -348,21 +338,17 @@ Duration - {interviewer['meeting_duration']}
 
         if not slots_to_offer:
             asked_for_more_slots = conversation.get('asked_for_more_slots', False)
-
             if not asked_for_more_slots:
-                conversation['asked_for_more_slots'] = True
-                self.conversations[conversation_id] = conversation
-                self.mongodb_handler.update_conversation(conversation_id, {
-                    'asked_for_more_slots': True
-                })
+                self.mongodb_handler.update_conversation(conversation_id, {'asked_for_more_slots': True})
+                conversation = self.mongodb_handler.get_conversation(conversation_id)
 
-                interviewee['state'] = ConversationState.NO_SLOTS_AVAILABLE.value
-                self.conversations[conversation_id]['interviewees'] = [
-                    ie if ie['number'] != interviewee_number else interviewee for ie in conversation['interviewees']
-                ]
-                self.mongodb_handler.update_conversation(conversation_id, {
-                    'interviewees': conversation['interviewees']
-                })
+                # Update interviewee state
+                for i, ie in enumerate(conversation['interviewees']):
+                    if ie['number'] == interviewee_number:
+                        ie['state'] = ConversationState.NO_SLOTS_AVAILABLE.value
+                        conversation['interviewees'][i] = ie
+                self.mongodb_handler.update_conversation(conversation_id, {'interviewees': conversation['interviewees']})
+                conversation = self.mongodb_handler.get_conversation(conversation_id)
 
                 system_message = (
                     f"Hello {interviewer['name']}, we have run out of available slots for some interviewees. "
@@ -379,11 +365,9 @@ Duration - {interviewer['meeting_duration']}
                 self.message_handler.send_message(interviewer['number'], response)
 
                 interviewer['state'] = ConversationState.AWAITING_MORE_SLOTS_FROM_INTERVIEWER.value
-                self.conversations[conversation_id]['interviewer'] = interviewer
-                self.mongodb_handler.update_conversation(conversation_id, {
-                    'interviewer': interviewer
-                })
+                self.mongodb_handler.update_conversation(conversation_id, {'interviewer': interviewer})
             else:
+                # No additional slots have been provided
                 unscheduled_interviewees = [ie for ie in conversation['interviewees']
                                             if ie['state'] not in [ConversationState.SCHEDULED.value, ConversationState.CANCELLED.value]]
 
@@ -392,56 +376,52 @@ Duration - {interviewer['meeting_duration']}
                         "We couldn't find any more available slots for your interview. "
                         "We will reach out later if new slots become available."
                     )
-                    resp = self.message_handler.generate_response(
+                    response = self.message_handler.generate_response(
                         ie,
                         interviewer,
                         "",
                         sys_msg,
                         conversation_state=ie['state']
                     )
-                    self.log_conversation(conversation_id, ie['number'], "system", resp, "AI")
-                    self.message_handler.send_message(ie['number'], resp)
+                    self.log_conversation(conversation_id, ie['number'], "system", response, "AI")
+                    self.message_handler.send_message(ie['number'], response)
                     ie['state'] = ConversationState.NO_SLOTS_AVAILABLE.value
 
-                self.conversations[conversation_id]['interviewees'] = conversation['interviewees']
-                self.mongodb_handler.update_conversation(conversation_id, {
-                    'interviewees': conversation['interviewees']
-                })
+                self.mongodb_handler.update_conversation(conversation_id, {'interviewees': conversation['interviewees']})
+                conversation = self.mongodb_handler.get_conversation(conversation_id)
 
                 sys_msg = "No additional slots provided. We have informed the remaining interviewees that no slots are available."
-                resp = self.message_handler.generate_response(
+                response = self.message_handler.generate_response(
                     interviewer,
                     None,
                     "",
                     sys_msg,
                     conversation_state=interviewer['state']
                 )
-                self.log_conversation(conversation_id, 'interviewer', "system", resp, "AI")
-                self.message_handler.send_message(interviewer['number'], resp)
+                self.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
+                self.message_handler.send_message(interviewer['number'], response)
 
                 self.notify_contact_person(conversation_id, None, AttentionFlag.NO_AVAILABLE_SLOTS)
 
             return
 
+        # Offer a slot
         proposed_slot = slots_to_offer[0]
         if 'offered_slots' not in interviewee:
             interviewee['offered_slots'] = []
         interviewee['offered_slots'].append(proposed_slot)
-        self.conversations[conversation_id]['interviewees'] = [
-            ie if ie['number'] != interviewee_number else interviewee for ie in conversation['interviewees']
-        ]
-        self.mongodb_handler.update_conversation(conversation_id, {
-            'interviewees': conversation['interviewees']
-        })
-
-        interviewee['proposed_slot'] = proposed_slot
-        interviewee['state'] = ConversationState.CONFIRMATION_PENDING.value
-        self.conversations[conversation_id]['interviewees'] = [
-            ie if ie['number'] != interviewee_number else interviewee for ie in conversation['interviewees']
-        ]
-        self.mongodb_handler.update_conversation(conversation_id, {
-            'interviewees': conversation['interviewees']
-        })
+        # Update interviewee in DB
+        for i, ie in enumerate(conversation['interviewees']):
+            if ie['number'] == interviewee_number:
+                ie.update({
+                    'offered_slots': interviewee['offered_slots'],
+                    'proposed_slot': proposed_slot,
+                    'state': ConversationState.CONFIRMATION_PENDING.value
+                })
+                conversation['interviewees'][i] = ie
+        self.mongodb_handler.update_conversation(conversation_id, {'interviewees': conversation['interviewees']})
+        conversation = self.mongodb_handler.get_conversation(conversation_id)
+        interviewee = next((ie for ie in conversation['interviewees'] if ie['number'] == interviewee_number), None)
 
         interviewee_timezone = interviewee.get('timezone', 'UTC')
         meeting_time_utc = datetime.fromisoformat(proposed_slot['start_time'])
@@ -459,14 +439,13 @@ Duration - {interviewer['meeting_duration']}
         self.message_handler.send_message(interviewee['number'], response)
 
     def finalize_scheduling_for_interviewee(self, conversation_id, interviewee_number):
-        conversation = self.conversations.get(conversation_id)
+        conversation = self.mongodb_handler.get_conversation(conversation_id)
         if not conversation:
             logger.error(f"Conversation {conversation_id} not found for finalizing scheduling.")
             return
 
         interviewer = conversation['interviewer']
         interviewee = next((ie for ie in conversation['interviewees'] if ie['number'] == interviewee_number), None)
-
         if not interviewee or not interviewee.get('proposed_slot'):
             logger.error(f"No proposed slot found for interviewee {interviewee_number} in conversation {conversation_id}.")
             return
@@ -474,23 +453,39 @@ Duration - {interviewer['meeting_duration']}
         try:
             meeting_time_utc = datetime.fromisoformat(interviewee['proposed_slot']['start_time'])
 
+            # Update interviewee's scheduled slot and state
             interviewee['scheduled_slot'] = interviewee['proposed_slot']
             interviewee['state'] = ConversationState.SCHEDULED.value
 
-            if interviewee['proposed_slot'] in conversation['available_slots']:
-                conversation['available_slots'].remove(interviewee['proposed_slot'])
-                self.conversations[conversation_id]['available_slots'] = conversation['available_slots']
-                self.mongodb_handler.update_conversation(conversation_id, {
-                    'available_slots': conversation['available_slots']
-                })
+            # Remove the scheduled slot from available slots
+            available_slots = conversation['available_slots']
+            if interviewee['proposed_slot'] in available_slots:
+                available_slots.remove(interviewee['proposed_slot'])
 
-            self.conversations[conversation_id]['interviewees'] = [
-                ie if ie['number'] != interviewee_number else interviewee for ie in conversation['interviewees']
-            ]
-            self.mongodb_handler.update_conversation(conversation_id, {
-                'interviewees': conversation['interviewees']
-            })
+            # Clear proposed_slot
+            interviewee['confirmed'] = False
+            interviewee['proposed_slot'] = None
 
+            # Update conversation with modified interviewee and slots
+            for i, ie in enumerate(conversation['interviewees']):
+                if ie['number'] == interviewee_number:
+                    conversation['interviewees'][i] = interviewee
+
+            if 'scheduled_slots' not in conversation:
+                conversation['scheduled_slots'] = []
+            conversation['scheduled_slots'].append(interviewee['scheduled_slot'])
+
+            update_data = {
+                'interviewees': conversation['interviewees'],
+                'available_slots': available_slots,
+                'scheduled_slots': conversation['scheduled_slots']
+            }
+            self.mongodb_handler.update_conversation(conversation_id, update_data)
+            conversation = self.mongodb_handler.get_conversation(conversation_id)
+            interviewer = conversation['interviewer']
+            interviewee = next((ie for ie in conversation['interviewees'] if ie['number'] == interviewee_number), None)
+
+            # Notify both participants
             for participant in [interviewer, interviewee]:
                 participant_timezone = participant.get('timezone', 'UTC')
                 try:
@@ -509,37 +504,19 @@ Duration - {interviewer['meeting_duration']}
                 self.log_conversation(conversation_id, participant['number'], "system", response, "AI")
                 self.message_handler.send_message(participant['number'], response)
 
-            interviewee['confirmed'] = False
-            interviewee['proposed_slot'] = None
-            self.conversations[conversation_id]['interviewees'] = [
-                ie if ie['number'] != interviewee_number else interviewee for ie in conversation['interviewees']
-            ]
-            self.mongodb_handler.update_conversation(conversation_id, {
-                'interviewees': conversation['interviewees']
-            })
-
-            if 'scheduled_slots' not in conversation:
-                conversation['scheduled_slots'] = []
-            conversation['scheduled_slots'].append(interviewee['scheduled_slot'])
-            self.conversations[conversation_id]['scheduled_slots'] = conversation['scheduled_slots']
-            self.mongodb_handler.update_conversation(conversation_id, {
-                'scheduled_slots': conversation['scheduled_slots']
-            })
-
+            # Create the calendar event
             event_result = self.api_handler.post_to_create_event(conversation_id, interviewee_number)
-            logger.info(f"event_result: {event_result}")
             if event_result:
-                interviewee['event_id'] = event_result.get('event_id')
-                if not interviewee['event_id']:
-                    logger.error(f"Failed to retrieve event_id for conversation {conversation_id} and interviewee {interviewee_number}.")
+                event_id = event_result.get('event_id')
+                if event_id:
+                    # Update the interviewee with the event_id
+                    for i, ie in enumerate(conversation['interviewees']):
+                        if ie['number'] == interviewee_number:
+                            ie['event_id'] = event_id
+                            conversation['interviewees'][i] = ie
+                    self.mongodb_handler.update_conversation(conversation_id, {'interviewees': conversation['interviewees']})
                 else:
-                    logger.info(f"event_id: {interviewee['event_id']}")
-                self.conversations[conversation_id]['interviewees'] = [
-                    ie if ie['number'] != interviewee_number else interviewee for ie in conversation['interviewees']
-                ]
-                self.mongodb_handler.update_conversation(conversation_id, {
-                    'interviewees': conversation['interviewees']
-                })
+                    logger.error(f"Failed to retrieve event_id for conversation {conversation_id} and interviewee {interviewee_number}.")
             else:
                 logger.error(f"Failed to create event for conversation {conversation_id} and interviewee {interviewee_number}.")
 
@@ -550,7 +527,7 @@ Duration - {interviewer['meeting_duration']}
             logger.error(traceback.format_exc())
 
     def initiate_next_interviewee(self, conversation_id):
-        conversation = self.conversations.get(conversation_id)
+        conversation = self.mongodb_handler.get_conversation(conversation_id)
         if not conversation:
             logger.error(f"Conversation {conversation_id} not found for initiating next interviewee.")
             return
@@ -564,7 +541,11 @@ Duration - {interviewer['meeting_duration']}
 
     def log_conversation(self, conversation_id: str, participant_id: str, message_type: str, message: str, sender: str) -> None:
         try:
-            conversation = self.conversations.get(conversation_id)
+            conversation = self.mongodb_handler.get_conversation(conversation_id)
+            if not conversation:
+                logger.error(f"Conversation {conversation_id} not found for logging.")
+                return
+
             participant = None
             if participant_id == 'interviewer':
                 participant = conversation['interviewer']
@@ -578,66 +559,58 @@ Duration - {interviewer['meeting_duration']}
             log_entry = f"{sender}: {message_type.capitalize()}: {message}"
             participant_history = participant.get('conversation_history', [])
             participant_history.append(log_entry)
-            if participant_id == 'interviewer':
+
+            if participant['role'] == 'interviewer':
                 self.mongodb_handler.update_conversation(conversation_id, {
-                    f'interviewer.conversation_history': participant_history
+                    'interviewer.conversation_history': participant_history
                 })
-                self.conversations[conversation_id]['interviewer']['conversation_history'] = participant_history
             else:
-                for idx, ie in enumerate(conversation['interviewees']):
+                # Update the specific interviewee
+                for i, ie in enumerate(conversation['interviewees']):
                     if ie['number'] == participant_id:
-                        self.conversations[conversation_id]['interviewees'][idx]['conversation_history'] = participant_history
-                        break
+                        conversation['interviewees'][i]['conversation_history'] = participant_history
                 self.mongodb_handler.update_conversation(conversation_id, {
                     'interviewees': conversation['interviewees']
                 })
+
             logger.debug(f"Logged message for participant {participant_id} in conversation {conversation_id}: {log_entry}")
         except Exception as e:
             logger.error(f"Error logging conversation: {str(e)}")
 
     def change_meeting_duration(self, conversation_id: str, new_duration: int):
-        """
-        Change the meeting duration for the conversation.
-        - Update interviewer and all interviewees meeting_duration.
-        - Resize all available_slots and scheduled_slots.
-        - Update all scheduled Google Calendar events accordingly.
-        """
         if new_duration <= 0:
             raise ValueError("Meeting duration must be positive.")
 
-        conversation = self.conversations.get(conversation_id)
+        conversation = self.mongodb_handler.get_conversation(conversation_id)
         if not conversation:
             logger.error(f"Conversation {conversation_id} not found for changing meeting duration.")
             return False
 
         # Update meeting_duration for interviewer
         conversation['interviewer']['meeting_duration'] = new_duration
-        
+
         # Update meeting_duration for each interviewee
         for ie in conversation['interviewees']:
             ie['meeting_duration'] = new_duration
 
         # Resize available_slots
-        # Assuming available_slots have a start_time and we must recalculate end_time based on new_duration
         for slot in conversation['available_slots']:
             start_dt = datetime.fromisoformat(slot['start_time'])
-            # Adjust end_time according to new duration
             end_dt = start_dt + timedelta(minutes=new_duration)
             slot['end_time'] = end_dt.isoformat()
 
-        # Resize archived_slots similarly
+        # Resize archived_slots
         for slot in conversation['archived_slots']:
             start_dt = datetime.fromisoformat(slot['start_time'])
             end_dt = start_dt + timedelta(minutes=new_duration)
             slot['end_time'] = end_dt.isoformat()
 
-        # Resize scheduled_slots and update events in Google Calendar
+        # Resize scheduled_slots
         for scheduled_slot in conversation.get('scheduled_slots', []):
             start_dt = datetime.fromisoformat(scheduled_slot['start_time'])
             end_dt = start_dt + timedelta(minutes=new_duration)
             scheduled_slot['end_time'] = end_dt.isoformat()
 
-        # Update MongoDB with changed duration and slots
         self.mongodb_handler.update_conversation(conversation_id, {
             'interviewer': conversation['interviewer'],
             'interviewees': conversation['interviewees'],
@@ -647,6 +620,7 @@ Duration - {interviewer['meeting_duration']}
         })
 
         # Update each scheduled event in Google Calendar
+        conversation = self.mongodb_handler.get_conversation(conversation_id)
         for ie in conversation['interviewees']:
             if ie.get('state') == ConversationState.SCHEDULED.value and ie.get('scheduled_slot') and ie.get('event_id'):
                 event_id = ie['event_id']
@@ -657,9 +631,7 @@ Duration - {interviewer['meeting_duration']}
                 if not update_success:
                     logger.error(f"Failed to update event {event_id} in conversation {conversation_id}.")
 
-        self.conversations[conversation_id] = conversation
         logger.info(f"Meeting duration changed to {new_duration} for conversation {conversation_id}.")
         return True
-
 
 scheduler = InterviewScheduler()
