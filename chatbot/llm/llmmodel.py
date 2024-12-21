@@ -25,7 +25,7 @@ if not logger.hasHandlers():
     )
 
 class LLMModel:
-    def generate_message(self, participant_name, participant_number, participant_email, participant_role, superior_flag, meeting_duration, role_to_contact_name, role_to_contact_number, role_to_contact_email, company_details, conversation_history, conversation_state, user_message, system_message, other_participant_conversation_history):
+    def generate_message(self, participant_name, participant_number, participant_email, participant_role, superior_flag, meeting_duration, role_to_contact_name, role_to_contact_number, role_to_contact_email, company_details, conversation_history, conversation_state, user_message, system_message):
         # Guardrail: Validate user input before invoking the LLM
         correction_message = self.correct_user_input_with_nlp(user_message)
         if correction_message:
@@ -55,8 +55,7 @@ class LLMModel:
                 'conversation_history',
                 'conversation_state',
                 'user_message',
-                'system_message',
-                'other_participant_conversation_history'
+                'system_message'
             ],
             template=PROMPT_TEMPLATE
         )
@@ -77,8 +76,7 @@ class LLMModel:
             'conversation_history': conversation_history,
             'conversation_state': conversation_state,
             'user_message': user_message,
-            'system_message': system_message,
-            'other_participant_conversation_history': other_participant_conversation_history
+            'system_message': system_message
         })
         
         logger.info(f"Generated message response: {response.content}")
@@ -92,7 +90,10 @@ Participant Name: {participant_name}
 Participant Role: {participant_role}
 Meeting Duration: {meeting_duration}
 Role to Contact: {role_to_contact_name}
-Conversation History: {conversation_history}
+Conversation History: 
+```
+{conversation_history}
+```
 Conversation State: {conversation_state}
 User Message: {user_message}
 
@@ -418,57 +419,57 @@ Answer the participant's question in a professional and concise manner.
             return None
 
     
-    def generate_conversational_message(self, participant_name, participant_number, participant_email, participant_role, superior_flag, meeting_duration, role_to_contact_name, role_to_contact_number, role_to_contact_email, company_details, conversation_history, conversation_state, user_message, system_message, other_participant_conversation_history):
-        PROMPT_TEMPLATE = f"""{PROMPT_TEMPLATES.CONVERSATIONAL_PROMPT_TEMPLATE}"""
+    # def generate_conversational_message(self, participant_name, participant_number, participant_email, participant_role, superior_flag, meeting_duration, role_to_contact_name, role_to_contact_number, role_to_contact_email, company_details, conversation_history, conversation_state, user_message, system_message, other_participant_conversation_history):
+    #     PROMPT_TEMPLATE = f"""{PROMPT_TEMPLATES.CONVERSATIONAL_PROMPT_TEMPLATE}"""
         
-        llm_model = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash",
-            temperature=1,
-        )
+    #     llm_model = ChatGoogleGenerativeAI(
+    #         model="gemini-1.5-flash",
+    #         temperature=1,
+    #     )
 
-        prompt_template = PromptTemplate(
-            input_variables=[
-                'participant_name',
-                'participant_number',
-                'participant_email',
-                'participant_role',
-                'superior_flag',
-                'meeting_duration',
-                'role_to_contact_name',
-                'role_to_contact_number',
-                'role_to_contact_email',
-                'company_details',
-                'conversation_history',
-                'conversation_state',
-                'user_message',
-                'system_message',
-                'other_participant_conversation_history'
-            ],
-            template=PROMPT_TEMPLATE
-        )
+    #     prompt_template = PromptTemplate(
+    #         input_variables=[
+    #             'participant_name',
+    #             'participant_number',
+    #             'participant_email',
+    #             'participant_role',
+    #             'superior_flag',
+    #             'meeting_duration',
+    #             'role_to_contact_name',
+    #             'role_to_contact_number',
+    #             'role_to_contact_email',
+    #             'company_details',
+    #             'conversation_history',
+    #             'conversation_state',
+    #             'user_message',
+    #             'system_message',
+    #             'other_participant_conversation_history'
+    #         ],
+    #         template=PROMPT_TEMPLATE
+    #     )
 
-        chain = prompt_template | llm_model
+    #     chain = prompt_template | llm_model
 
-        response = chain.invoke({
-            'participant_name': participant_name,
-            'participant_number': participant_number,
-            'participant_email': participant_email,
-            'participant_role': participant_role,
-            'superior_flag': superior_flag,
-            'meeting_duration': meeting_duration,
-            'role_to_contact_name': role_to_contact_name,
-            'role_to_contact_number': role_to_contact_number,
-            'role_to_contact_email': role_to_contact_email,
-            'company_details': company_details,
-            'conversation_history': conversation_history,
-            'conversation_state': conversation_state,
-            'user_message': user_message,
-            'system_message': system_message,
-            'other_participant_conversation_history': other_participant_conversation_history
-        })
+    #     response = chain.invoke({
+    #         'participant_name': participant_name,
+    #         'participant_number': participant_number,
+    #         'participant_email': participant_email,
+    #         'participant_role': participant_role,
+    #         'superior_flag': superior_flag,
+    #         'meeting_duration': meeting_duration,
+    #         'role_to_contact_name': role_to_contact_name,
+    #         'role_to_contact_number': role_to_contact_number,
+    #         'role_to_contact_email': role_to_contact_email,
+    #         'company_details': company_details,
+    #         'conversation_history': conversation_history,
+    #         'conversation_state': conversation_state,
+    #         'user_message': user_message,
+    #         'system_message': system_message,
+    #         'other_participant_conversation_history': other_participant_conversation_history
+    #     })
         
-        logger.info(f"Generated conversational message response: {response.content}")
-        return response.content
+    #     logger.info(f"Generated conversational message response: {response.content}")
+    #     return response.content
 
     def detect_intent(self, participant_name, participant_role, meeting_duration, role_to_contact, conversation_history, conversation_state, user_message):
         PROMPT_TEMPLATE = f"""{PROMPT_TEMPLATES.DETECT_INTENT_PROMPT_TEMPLATE}"""
@@ -786,4 +787,54 @@ d database
 
         except Exception as e:
             logger.error(f"Error in extract_meeting_duration: {str(e)}")
+            return None
+    
+    def extract_interviewee_name(self, user_message):
+        """
+        Extracts the interviewee's name from the cancellation message.
+
+        Args:
+            user_message (str): The user's cancellation message.
+
+        Returns:
+            str: The extracted interviewee's name if found, else None.
+        """
+        try:
+            json1="""
+                {{
+                    "interviewee_name": "Name here"
+                }}
+            """
+            
+            PROMPT_TEMPLATE = f"""
+                Extract the interviewee's name from the following cancellation message.
+
+                Message: "{user_message}"
+
+                ### Extraction
+                {json1}
+            """
+            prompt_template = PromptTemplate(
+                input_variables=['user_message'],
+                template=PROMPT_TEMPLATE
+            )
+
+            llm_model = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                temperature=0.3,
+            )
+
+            chain = prompt_template | llm_model
+            response = chain.invoke({'user_message': user_message})
+            llm_output = response.content.strip()
+
+            # Extract JSON from the response
+            parsed_data = self.extract_json_from_response(llm_output)
+            interviewee_name = parsed_data.get("interviewee_name")
+
+            if interviewee_name:
+                return interviewee_name.strip()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting interviewee name: {str(e)}")
             return None

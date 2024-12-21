@@ -59,7 +59,7 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max-limit
 CORS(app, resources={
     r"/api/*": {
         "origins": ["http://localhost:3000", "http://localhost:8080"],
-        "methods": ["GET", "POST", "OPTIONS"],
+        "methods": ["GET", "POST", "DELETE", "OPTIONS"],  # Added "DELETE" here
         "allow_headers": ["Content-Type", "x-api-key", "Authorization"],
         "expose_headers": ["Content-Type", "x-api-key"],
         "supports_credentials": False,
@@ -464,7 +464,7 @@ def get_active_conversations():
                     'status': 'active',
                     'last_activity': conversation.get('last_response_times', {}).get(
                         interviewer['number'],
-                        datetime.utcnow().isoformat()
+                        datetime.now().isoformat()
                     )
                 })
 
@@ -504,57 +504,101 @@ def get_scheduled_interviews():
     except Exception as e:
         logger.error(f"Error fetching scheduled interviews: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
-
-@app.route('/api/attention-flags', methods=['GET'])
+    
+@app.route('/api/conversations/completed', methods=['GET'])
 @require_api_key
-def get_attention_flags():
+def get_completed_conversations():
+    logger.info("Received request for completed conversations")
     try:
         all_conversations = scheduler.mongodb_handler.get_all_conversations()
-        flags = []
-        current_time = datetime.now(pytz.UTC)
+        completed_conversations = []
 
         for conversation in all_conversations:
-            conversation_id = conversation['conversation_id']
-            evaluator = scheduler.evaluator
-            flags_dict = evaluator.evaluate_conversation_flags(conversation, current_time)
-            for participant_id, participant_flags in flags_dict.items():
-                for flag in participant_flags:
-                    flags.append({
-                        'id': str(uuid.uuid4()),
-                        'conversation_id': conversation_id,
-                        'message': f"Attention required for {participant_id}: {flag.value}",
-                        'severity': 'high',
-                        'created_at': flag.timestamp.isoformat(),
-                        'resolved': flag.resolved
-                    })
+            if conversation.get('status') == 'completed':
+                interviewer = conversation['interviewer']
+                interviewees = conversation.get('interviewees', [])
 
-        return jsonify(flags), 200
+                completed_conversations.append({
+                    'id': conversation['conversation_id'],
+                    'interviewer_name': interviewer['name'],
+                    'interviewer_email': interviewer['email'],
+                    'interviewer_number': interviewer['number'],
+                    'interviewees': [{
+                        'id': str(idx),
+                        'name': ie['name'],
+                        'email': ie['email'],
+                        'number': ie['number'],
+                        'status': ie['state']
+                    } for idx, ie in enumerate(interviewees)],
+                    'status': 'completed',
+                    'completed_at': conversation.get('completed_at', ''),
+                    'last_activity': conversation.get('last_response_times', {}).get(
+                        interviewer['number'],
+                        conversation.get('completed_at', datetime.now().isoformat())
+                    )
+                })
+
+        return jsonify(completed_conversations), 200
     except Exception as e:
-        logger.error(f"Error fetching attention flags: {str(e)}")
+        logger.error(f"Error fetching completed conversations: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
+    
+@app.route('/api/attention-flags', methods=['GET'])
+@require_api_key
+def get_all_attention_flags():
+    logger.info("Received request for all attention flags")
+    try:
+        attention_flags = scheduler.mongodb_handler.get_all_attention_flags()
+        return jsonify(attention_flags), 200
+    except Exception as e:
+        logger.error(f"Error fetching all attention flags: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/api/conversations/<conversation_id>/attention-flags', methods=['GET'])
+@require_api_key
+def get_conversation_attention_flags(conversation_id: str):
+    logger.info(f"Received request for attention flags of conversation {conversation_id}")
+    try:
+        attention_flags = scheduler.mongodb_handler.get_attention_flags(conversation_id)
+        return jsonify(attention_flags), 200
+    except Exception as e:
+        logger.error(f"Error fetching attention flags for conversation {conversation_id}: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+    
 
 @app.route('/api/attention-flags/<flag_id>/resolve', methods=['POST'])
 @require_api_key
 def resolve_attention_flag(flag_id):
-    # **Note:** Since AttentionFlagManager currently stores flags in memory,
-    # resolving a flag by its ID isn't directly possible. To fully implement
-    # this feature, consider refactoring AttentionFlagManager to store flags
-    # in MongoDB with unique IDs.
-    #
-    # For now, this endpoint will return a success message without actual resolution.
-    #
-    # Future Implementation:
-    # 1. Store each flag with a unique ID in MongoDB.
-    # 2. Update the 'resolved' status of the flag in the database.
-    # 3. Modify the AttentionFlagManager to interact with the database.
-    
     try:
-        # Placeholder implementation
-        logger.info(f"Flag {flag_id} resolved (placeholder implementation).")
-        return jsonify({'message': 'Flag resolved successfully'}), 200
+        # Update the flag as resolved in the database
+        result = scheduler.mongodb_handler.resolve_attention_flag(flag_id)
+        if result:
+            logger.info(f"Flag {flag_id} resolved successfully.")
+            return jsonify({'message': 'Flag resolved successfully'}), 200
+        else:
+            logger.warning(f"Flag {flag_id} not found.")
+            return jsonify({'error': 'Flag not found'}), 404
     except Exception as e:
-        logger.error(f"Error resolving attention flag: {str(e)}")
+        logger.error(f"Error resolving attention flag {flag_id}: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/api/conversations/<conversation_id>', methods=['DELETE'])
+@require_api_key
+def delete_conversation(conversation_id: str):
+    logger.info(f"Received request to delete conversation {conversation_id}")
+    try:
+        # Delete the conversation
+        result = scheduler.mongodb_handler.delete_conversation(conversation_id)
+        if result:
+            logger.info(f"Conversation {conversation_id} deleted successfully.")
+            return jsonify({'message': f'Conversation {conversation_id} deleted successfully.'}), 200
+        else:
+            logger.warning(f"Conversation {conversation_id} not found.")
+            return jsonify({'error': 'Conversation not found'}), 404
+    except Exception as e:
+        logger.error(f"Error deleting conversation {conversation_id}: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
 
 @app.route('/api/health', methods=['GET'])
 def health_check() -> Tuple[Response, int]:
@@ -566,7 +610,7 @@ def health_check() -> Tuple[Response, int]:
 
         return jsonify({
             "status": "healthy",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().isoformat(),
             "environment": ENVIRONMENT,
             "database": "connected",
             "version": "1.0.0"

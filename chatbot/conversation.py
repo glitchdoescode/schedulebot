@@ -6,7 +6,7 @@ import json
 import os
 import traceback
 import uuid
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from .attention import AttentionFlagManager
 from .schedule_api import ScheduleAPI
@@ -72,29 +72,55 @@ class AttentionFlagHandler:
             all_flags.update(fset)
 
         if all_flags:
-            self.notify_contact_person(conversation_id, all_flags)
+            # Store flags in the database
+            self.store_attention_flags(conversation_id, all_flags)
 
-    def notify_contact_person(self, conversation_id: str, flags):
-        conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
-        if not conversation:
-            logger.error(f"Conversation {conversation_id} not found for notifying contact person.")
-            return
-
-        contact_name = conversation['role_to_contact_name']
-        contact_number = conversation['role_to_contact_number']
-
-        notification_lines = []
+    def store_attention_flags(self, conversation_id: str, flags: set):
         for flag in flags:
-            if flag == AttentionFlag.NO_RESPONSE:
-                notification_lines.append("We haven't heard from a participant in over 24 hours.")
-            elif flag == AttentionFlag.MISSED_SCHEDULED_MEETING:
-                notification_lines.append("A participant appears to have missed their scheduled meeting.")
-            elif flag == AttentionFlag.NO_AVAILABLE_SLOTS:
-                notification_lines.append("No more available slots are available for an interviewee.")
+            flag_id = str(uuid.uuid4())  # Ensure each flag has a unique string ID
+            flag_entry = {
+                'id': flag_id,
+                'conversation_id': conversation_id,
+                'flag_type': flag.value,
+                'message': self.generate_flag_message(flag),
+                'severity': 'high',
+                'created_at': datetime.now(pytz.UTC).isoformat(),
+                'resolved': False
+            }
+            self.scheduler.mongodb_handler.create_attention_flag(flag_entry)
+            logger.info(f"Stored attention flag {flag_id} for conversation {conversation_id}.")
 
-        notification_message = f"Attention {contact_name},\n" + "\n".join(notification_lines) + "\nPlease assist."
-        self.scheduler.message_handler.send_message(contact_number, notification_message)
-        self.scheduler.log_conversation(conversation_id, 'system', 'notification', notification_message, 'System')
+    def generate_flag_message(self, flag: AttentionFlag) -> str:
+        if flag == AttentionFlag.NO_RESPONSE:
+            return "No response from participant for over 24 hours."
+        elif flag == AttentionFlag.MISSED_SCHEDULED_MEETING:
+            return "Participant missed their scheduled meeting."
+        elif flag == AttentionFlag.NO_AVAILABLE_SLOTS:
+            return "No available slots left for interviewees."
+        else:
+            return "Unknown attention flag."
+
+    # def notify_contact_person(self, conversation_id: str, flags):
+    #     conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
+    #     if not conversation:
+    #         logger.error(f"Conversation {conversation_id} not found for notifying contact person.")
+    #         return
+
+    #     contact_name = conversation['role_to_contact_name']
+    #     contact_number = conversation['role_to_contact_number']
+
+    #     notification_lines = []
+    #     for flag in flags:
+    #         if flag == AttentionFlag.NO_RESPONSE:
+    #             notification_lines.append("We haven't heard from a participant in over 24 hours.")
+    #         elif flag == AttentionFlag.MISSED_SCHEDULED_MEETING:
+    #             notification_lines.append("A participant appears to have missed their scheduled meeting.")
+    #         elif flag == AttentionFlag.NO_AVAILABLE_SLOTS:
+    #             notification_lines.append("No more available slots are available for an interviewee.")
+
+    #     notification_message = f"Attention {contact_name},\n" + "\n".join(notification_lines) + "\nPlease assist."
+    #     self.scheduler.message_handler.send_message(contact_number, notification_message)
+    #     self.scheduler.log_conversation(conversation_id, 'system', 'notification', notification_message, 'System')
 
 
 class InterviewScheduler:
@@ -111,6 +137,9 @@ class InterviewScheduler:
 
         self.setup_conversation_logger()
 
+        # Initialize conversation queues
+        self.conversation_queues: Dict[str, List[str]] = {}  # Key: interviewer number, Value: list of conversation_ids
+
     def check_attention_flags(self):
         current_time = datetime.now(pytz.UTC)
         conversations = self.mongodb_handler.get_all_conversations()
@@ -122,7 +151,8 @@ class InterviewScheduler:
                 self.flag_handler.handle_flags_for_conversation(conversation_id, flags_dict)
 
     def notify_contact_person(self, conversation_id: str, flagged_participant_id: Optional[str], flag_type: AttentionFlag):
-        self.flag_handler.notify_contact_person(conversation_id, {flag_type})
+        # No longer notify contact person; flags are stored in the database
+        pass
 
     def setup_conversation_logger(self):
         self.conversation_logger = logging.getLogger('conversation_history')
@@ -221,6 +251,60 @@ class InterviewScheduler:
 
         interviewer_number = normalize_number(interviewer_number)
 
+        # Check if the interviewer has active conversations
+        active_conversations = self.mongodb_handler.find_active_conversations_by_interviewer(interviewer_number)
+        if active_conversations:
+            # Add to queue
+            conversation_id = str(uuid.uuid4())
+            conversation_data = {
+                'conversation_id': conversation_id,
+                'interviewer': self._create_participant_dict(
+                    name=interviewer_name,
+                    number=interviewer_number,
+                    email=interviewer_email,
+                    role='interviewer',
+                    superior_flag=superior_flag,
+                    meeting_duration=meeting_duration,
+                    role_to_contact_name=role_to_contact_name,
+                    role_to_contact_number=role_to_contact_number,
+                    role_to_contact_email=role_to_contact_email,
+                    company_details=company_details
+                ),
+                'interviewees': [
+                    self._create_participant_dict(
+                        name=ie['name'],
+                        number=normalize_number(ie['number']),
+                        email=ie['email'],
+                        role='interviewee',
+                        superior_flag=superior_flag,
+                        meeting_duration=meeting_duration,
+                        role_to_contact_name=role_to_contact_name,
+                        role_to_contact_number=role_to_contact_number,
+                        role_to_contact_email=role_to_contact_email,
+                        company_details=company_details,
+                        jd_title=ie.get('jd_title', "")
+                    )
+                    for ie in interviewees_data
+                ],
+                'alternate_slots_requested': False,
+                'created_at': datetime.now().isoformat(),
+                'scheduled_slots': [],
+                'role_to_contact_name': role_to_contact_name,
+                'role_to_contact_number': role_to_contact_number,
+                'role_to_contact_email': role_to_contact_email,
+                'company_details': company_details,
+                'available_slots': [],
+                'archived_slots': [],
+                'last_response_times': {},
+                'status': 'queued'  # New field to indicate status
+            }
+            self.mongodb_handler.create_conversation(conversation_data)
+            self.enqueue_conversation(interviewer_number, conversation_id)
+            logger.info(f"New conversation queued for interviewer {interviewer_number}: {conversation_id}")
+            self.log_conversation_history(conversation_id)
+            return conversation_id
+
+        # No active conversations, proceed normally
         conversation_id = str(uuid.uuid4())
 
         interviewer = self._create_participant_dict(
@@ -249,7 +333,7 @@ class InterviewScheduler:
                 role_to_contact_number=role_to_contact_number,
                 role_to_contact_email=role_to_contact_email,
                 company_details=company_details,
-                jd_title=interviewee_data['jd_title']
+                jd_title=interviewee_data.get('jd_title', "")
             )
             interviewees.append(interviewee)
 
@@ -266,7 +350,8 @@ class InterviewScheduler:
             'company_details': company_details,
             'available_slots': [],
             'archived_slots': [],
-            'last_response_times': {}
+            'last_response_times': {},
+            'status': 'active'  # New field to indicate active status
         }
 
         self.mongodb_handler.create_conversation(conversation_data)
@@ -274,6 +359,19 @@ class InterviewScheduler:
         logger.info(f"New conversation started: {conversation_id}")
         self.log_conversation_history(conversation_id)
         return conversation_id
+
+    def enqueue_conversation(self, interviewer_number: str, conversation_id: str):
+        if interviewer_number not in self.conversation_queues:
+            self.conversation_queues[interviewer_number] = []
+        self.conversation_queues[interviewer_number].append(conversation_id)
+        logger.debug(f"Conversation {conversation_id} enqueued for interviewer {interviewer_number}.")
+
+    def dequeue_conversation(self, interviewer_number: str) -> Optional[str]:
+        if interviewer_number in self.conversation_queues and self.conversation_queues[interviewer_number]:
+            conversation_id = self.conversation_queues[interviewer_number].pop(0)
+            logger.debug(f"Conversation {conversation_id} dequeued for interviewer {interviewer_number}.")
+            return conversation_id
+        return None
 
     def initiate_conversation_with_interviewer(self, conversation_id):
         conversation = self.mongodb_handler.get_conversation(conversation_id)
@@ -293,13 +391,16 @@ class InterviewScheduler:
             ]
             candidates_info = "Here are the candidates assigned:\n" + "\n".join(candidates_info_list)
 
-        system_message = f"""Hello {interviewer['name']}, I’m here to assist with scheduling interviews for the upcoming candidates. Could you please provide your availability for the coming week?
+        system_message = f"""Say Hello to {interviewer['name']},and tell him that you are here to assist with scheduling interviews for the upcoming candidates. Also ask them to provide their availability for the coming week.
 
-Feel free to share any specific time preferences or constraints. Once I have your availability, I’ll coordinate with the candidates.
+Tell them to feel free to share any specific time preferences or constraints and once you have their availability, you’ll coordinate with the candidates.
 
 ##Details about the interview - 
+Candidates_Info - 
+```
 {candidates_info}
-Duration - {interviewer['meeting_duration']}
+```
+Duration - {interviewer['meeting_duration']} minutes
 """
 
         response = self.message_handler.generate_response(
@@ -351,8 +452,8 @@ Duration - {interviewer['meeting_duration']}
                 conversation = self.mongodb_handler.get_conversation(conversation_id)
 
                 system_message = (
-                    f"Hello {interviewer['name']}, we have run out of available slots for some interviewees. "
-                    f"Could you please provide more availability?"
+                    f"Tell the {interviewer['name']}, that you have run out of available slots for some interviewees. "
+                    f"Ask them to provide more availability politely."
                 )
                 response = self.message_handler.generate_response(
                     interviewer,
@@ -373,12 +474,12 @@ Duration - {interviewer['meeting_duration']}
 
                 for ie in unscheduled_interviewees:
                     sys_msg = (
-                        "We couldn't find any more available slots for your interview. "
-                        "We will reach out later if new slots become available."
+                        "Tell the interviewee that you were not able to find any more available slots for your interview. "
+                        "Also tell them that you will reach out to them later when new slots become available."
                     )
                     response = self.message_handler.generate_response(
                         ie,
-                        interviewer,
+                        None,
                         "",
                         sys_msg,
                         conversation_state=ie['state']
@@ -390,7 +491,7 @@ Duration - {interviewer['meeting_duration']}
                 self.mongodb_handler.update_conversation(conversation_id, {'interviewees': conversation['interviewees']})
                 conversation = self.mongodb_handler.get_conversation(conversation_id)
 
-                sys_msg = "No additional slots provided. We have informed the remaining interviewees that no slots are available."
+                sys_msg = "Tell the interviewer that no additional slots were provided.Also tell him/her that you have informed the remaining interviewees that no slots are available."
                 response = self.message_handler.generate_response(
                     interviewer,
                     None,
@@ -401,7 +502,8 @@ Duration - {interviewer['meeting_duration']}
                 self.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                 self.message_handler.send_message(interviewer['number'], response)
 
-                self.notify_contact_person(conversation_id, None, AttentionFlag.NO_AVAILABLE_SLOTS)
+                # Notify via attention flags
+                self.scheduler.flag_handler.handle_flags_for_conversation(conversation_id, {ConversationState.NO_AVAILABLE_SLOTS})
 
             return
 
@@ -427,10 +529,10 @@ Duration - {interviewer['meeting_duration']}
         meeting_time_utc = datetime.fromisoformat(proposed_slot['start_time'])
         localized_meeting_time = meeting_time_utc.astimezone(pytz.timezone(interviewee_timezone))
 
-        system_message = f"A proposed meeting time is: {localized_meeting_time.strftime('%A, %B %d, %Y at %I:%M %p %Z')}. Please confirm if this works."
+        system_message = f"Tell the interviewee that there is a proposed meeting time i.e: {localized_meeting_time.strftime('%A, %B %d, %Y at %I:%M %p %Z')}. Ask them to confirm if this works."
         response = self.message_handler.generate_response(
             interviewee,
-            interviewer,
+            None,
             "",
             system_message,
             conversation_state=interviewee['state']
@@ -493,10 +595,10 @@ Duration - {interviewer['meeting_duration']}
                 except pytz.exceptions.UnknownTimeZoneError:
                     tz = pytz.UTC
                 localized_meeting_time = meeting_time_utc.astimezone(tz)
-                system_message = f"Your meeting is scheduled for {localized_meeting_time.strftime('%A, %B %d, %Y at %I:%M %p %Z')}."
+                system_message = f"Tell the participant that their meeting is scheduled for {localized_meeting_time.strftime('%A, %B %d, %Y at %I:%M %p %Z')}."
                 response = self.message_handler.generate_response(
                     participant,
-                    interviewer if participant['role'] == 'interviewee' else interviewee,
+                    None,
                     "",
                     system_message,
                     conversation_state=participant['state']
@@ -522,6 +624,10 @@ Duration - {interviewer['meeting_duration']}
 
             self.initiate_next_interviewee(conversation_id)
 
+            # Check if conversation is complete
+            if self.is_conversation_complete(conversation):
+                self.complete_conversation(conversation_id)
+
         except Exception as e:
             logger.error(f"Error finalizing scheduling for interviewee {interviewee_number} in conversation {conversation_id}: {str(e)}")
             logger.error(traceback.format_exc())
@@ -538,6 +644,9 @@ Duration - {interviewer['meeting_duration']}
                 return
 
         logger.info(f"All interviewees have been contacted or scheduled for conversation {conversation_id}.")
+
+        # After all interviewees are handled, mark conversation as completed
+        self.complete_conversation(conversation_id)
 
     def log_conversation(self, conversation_id: str, participant_id: str, message_type: str, message: str, sender: str) -> None:
         try:
@@ -633,5 +742,45 @@ Duration - {interviewer['meeting_duration']}
 
         logger.info(f"Meeting duration changed to {new_duration} for conversation {conversation_id}.")
         return True
+
+    def complete_conversation(self, conversation_id: str):
+        """
+        Mark the conversation as completed and initiate the next conversation in the queue if any.
+        """
+        conversation = self.mongodb_handler.get_conversation(conversation_id)
+        if not conversation:
+            logger.error(f"Conversation {conversation_id} not found for completion.")
+            return
+
+        # Update conversation status to completed and set completed_at
+        self.mongodb_handler.update_conversation(
+            conversation_id, 
+            {'status': 'completed', 'completed_at': datetime.now().isoformat()}
+        )
+        interviewer_number = conversation['interviewer']['number']
+        self.initiate_next_conversation_if_available(interviewer_number)
+        logger.info(f"Conversation {conversation_id} marked as completed.")
+
+    def is_conversation_complete(self, conversation: Dict[str, Any]) -> bool:
+        """
+        Determine if the conversation is complete.
+        A conversation is complete if all interviewees are either scheduled or cancelled.
+        """
+        for ie in conversation['interviewees']:
+            if ie['state'] not in [ConversationState.SCHEDULED.value, ConversationState.CANCELLED.value]:
+                return False
+        return True
+
+    def check_and_complete_conversation(self, conversation_id: str):
+        """
+        Check if a conversation is complete and mark it as such if true.
+        """
+        conversation = self.mongodb_handler.get_conversation(conversation_id)
+        if not conversation:
+            logger.error(f"Conversation {conversation_id} not found for completion check.")
+            return
+
+        if self.is_conversation_complete(conversation):
+            self.complete_conversation(conversation_id)
 
 scheduler = InterviewScheduler()

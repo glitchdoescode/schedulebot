@@ -44,6 +44,9 @@ api.interceptors.request.use(
   }
 );
 
+/**
+ * Initialize Interviews by sending conversation data to the backend.
+ */
 export const initializeInterviews = async (data: Conversation[]): Promise<InitializeResponse> => {
   try {
     const response = await api.post<InitializeResponse>('/initialize', { conversations: data });
@@ -54,6 +57,9 @@ export const initializeInterviews = async (data: Conversation[]): Promise<Initia
   }
 };
 
+/**
+ * Fetch all active conversations.
+ */
 export const getActiveConversations = async (): Promise<ActiveConversation[]> => {
   try {
     const response = await api.get<ActiveConversation[]>('/conversations/active');
@@ -64,6 +70,22 @@ export const getActiveConversations = async (): Promise<ActiveConversation[]> =>
   }
 };
 
+/**
+ * Fetch all completed conversations.
+ */
+export const getCompletedConversations = async (): Promise<ActiveConversation[]> => {
+  try {
+    const response = await api.get<ActiveConversation[]>('/conversations/completed');
+    return response.data;
+  } catch (error) {
+    console.error('Error fetching completed conversations:', error);
+    return []; // Return empty array instead of throwing
+  }
+};
+
+/**
+ * Fetch all scheduled interviews.
+ */
 export const getScheduledInterviews = async (): Promise<ScheduledInterview[]> => {
   try {
     const response = await api.get<ScheduledInterview[]>('/interviews/scheduled');
@@ -74,6 +96,9 @@ export const getScheduledInterviews = async (): Promise<ScheduledInterview[]> =>
   }
 };
 
+/**
+ * Fetch all attention flags.
+ */
 export const getAttentionFlags = async (): Promise<AttentionFlag[]> => {
   try {
     const response = await api.get<AttentionFlag[]>('/attention-flags');
@@ -84,6 +109,21 @@ export const getAttentionFlags = async (): Promise<AttentionFlag[]> => {
   }
 };
 
+/**
+ * Delete a specific conversation by ID.
+ */
+export const deleteConversation = async (conversationId: string): Promise<void> => {
+  try {
+    await api.delete(`/conversations/${conversationId}`);
+  } catch (error) {
+    console.error('Error deleting conversation:', error);
+    throw error;
+  }
+};
+
+/**
+ * Resolve a specific attention flag by ID.
+ */
 export const resolveAttentionFlag = async (flagId: string): Promise<void> => {
   try {
     await api.post(`/attention-flags/${flagId}/resolve`);
