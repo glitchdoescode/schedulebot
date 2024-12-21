@@ -7,6 +7,7 @@ import logging
 from langchain.prompts import PromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
+import re
 
 load_dotenv()
 
@@ -397,3 +398,153 @@ Phone number: {phone_number} """
     timezone = result.get('timezone', 'unspecified')
     return timezone
 
+def extract_city_from_message(message: str) -> str:
+    """ Uses LLM to extract the city from the user's message. """ 
+    PROMPT_TEMPLATE = """ You are an assistant that extracts the city name from a user's message.
+
+Given the following message, identify and return the city mentioned.
+
+Provide your answer in the following JSON format:
+{{
+  "city": "City Name"
+}}
+If no city is found, set "city" to "unspecified".
+
+Examples:
+
+Message: "I am based in New York and available for the interview."
+
+Output:
+
+{{ 
+  "city": "New York" 
+}}
+
+Message: "Looking forward to our meeting."
+
+Output:
+
+{{
+  "city": "unspecified" 
+}}
+
+Now, extract the city from the following message:
+
+Message: {message} """
+
+    llm_model = ChatGoogleGenerativeAI(
+        model="gemini-1.5-flash",
+        temperature=0.5,
+    )
+
+    prompt_template = PromptTemplate(
+        input_variables=['message'],
+        template=PROMPT_TEMPLATE
+    )
+
+    chain = prompt_template | llm_model
+
+    response = chain.invoke({
+        'message': message
+    })
+
+    # Parse the LLM output
+    result = parse_llm_json_timezone(response.content)
+
+    city = result.get('city', 'unspecified')
+    return city
+
+def extract_timezone_from_city(city: str) -> str: 
+    """ Uses LLM to infer the timezone from the city name. """ 
+    if city.lower() == 'unspecified' or not city.strip(): 
+        return 'unspecified'
+    PROMPT_TEMPLATE = """
+You are an expert assistant that determines the timezone of a city.
+
+Given the following city name, provide its timezone in the following JSON format:
+{{
+  "timezone": "Continent/City"
+}}
+If the timezone cannot be determined, set "timezone" to "unspecified".
+
+Examples:
+
+City: Tokyo Output:
+
+{{ "timezone": "Asia/Tokyo" }}
+
+City: London Output:
+
+{{ "timezone": "Europe/London" }}
+
+Now, determine the timezone for the following city:
+
+City: {city} """
+    llm_model = ChatGoogleGenerativeAI(
+        model="gemini-1.5-flash",
+        temperature=0.7,
+    )
+
+    prompt_template = PromptTemplate(
+        input_variables=['city'],
+        template=PROMPT_TEMPLATE
+    )
+
+    chain = prompt_template | llm_model
+
+    response = chain.invoke({
+        'city': city
+    })
+
+    # Parse the LLM output
+    result = parse_llm_json_timezone(response.content)
+
+    timezone = result.get('timezone', 'unspecified')
+    return timezone
+
+def sanitize_message(message: str) -> str:
+    """
+    Sanitizes the user message by removing special characters and emojis.
+    
+    Args:
+        message (str): The raw message input from the user.
+    
+    Returns:
+        str: The sanitized message with emojis and non-printable characters removed.
+    """
+    # Define a regex pattern to match emojis and various symbol ranges
+    emoji_pattern = re.compile(
+        "[" 
+        "\U0001F600-\U0001F64F"  # Emoticons
+        "\U0001F300-\U0001F5FF"  # Symbols & Pictographs
+        "\U0001F680-\U0001F6FF"  # Transport & Map Symbols
+        "\U0001F1E0-\U0001F1FF"  # Flags
+        "]+", 
+        flags=re.UNICODE
+    )
+    
+    # Remove emojis using the regex pattern
+    message = emoji_pattern.sub(r'', message)
+    
+    # Remove other non-printable characters
+    message = ''.join(filter(lambda x: x.isprintable(), message))
+    
+    return message
+
+def get_localized_current_time(timezone_str: str) -> str:
+    """
+    Returns the current time localized to the specified timezone.
+
+    Args:
+        timezone_str (str): Timezone string in the format 'Continent/City'.
+
+    Returns:
+        str: Formatted current time in the specified timezone.
+    """
+    try:
+        tz = pytz.timezone(timezone_str)
+    except pytz.UnknownTimeZoneError:
+        logger.error(f"Unknown timezone: {timezone_str}. Defaulting to UTC.")
+        tz = pytz.UTC
+    localized_time = datetime.now(tz).strftime('%A, %B %d, %Y at %I:%M %p %Z')
+    return localized_time
