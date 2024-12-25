@@ -8,10 +8,10 @@ import pytz
 from twilio.rest import Client
 from twilio.base.exceptions import TwilioRestException
 from chatbot.constants import ConversationState, AttentionFlag
-from chatbot.utils import extract_slots_and_timezone, normalize_number, extract_timezone_from_number
+from chatbot.utils import extract_timezone_from_city, extract_city_from_message, extract_slots_and_timezone, normalize_number, extract_timezone_from_number, get_localized_current_time
 from dotenv import load_dotenv
 from .llm.llmmodel import LLMModel
-import json
+import traceback
 from typing import Dict, Any
 
 load_dotenv()
@@ -176,19 +176,6 @@ class MessageHandler:
                 self.handle_reschedule_request_interviewer(conversation_id, participant, message)
             else:
                 self.handle_reschedule_request_interviewee(conversation_id, participant, message)
-
-        elif "SLOT_ADD_REQUESTED" in intent and participant['role'] == 'interviewer':
-            self.handle_add_slot_request(conversation_id, participant, message)
-
-        elif "SLOT_REMOVE_REQUESTED" in intent and participant['role'] == 'interviewer':
-            self.handle_remove_slot_request(conversation_id, participant, message)
-
-        elif "SLOT_UPDATE_REQUESTED" in intent and participant['role'] == 'interviewer':
-            self.handle_update_slot_request(conversation_id, participant, message)
-
-        elif "MEETING_DURATION_CHANGE_REQUESTED" in intent and participant['role'] == 'interviewer':
-            self.handle_meeting_duration_change_request(conversation_id, participant, message)
-
         else:
             # Regular flow
             if participant['role'] == 'interviewer':
@@ -258,7 +245,11 @@ class MessageHandler:
             if confirmation_response.get('confirmed'):
                 temp_slots = interviewer.get('temp_slots')
                 if not temp_slots:
-                    system_message = "Error with the time slots. Please provide availability again."
+                    # Get localized current time
+                    timezone_str = interviewer.get('timezone', 'UTC')
+                    current_time = get_localized_current_time(timezone_str)
+
+                    system_message = f"Error with the time slots. Please provide availability again.\n\nCurrent Time: {current_time}"
                     response = self.generate_response(
                         interviewer,
                         None,
@@ -277,7 +268,11 @@ class MessageHandler:
                     'interviewer': interviewer
                 })
 
-                system_message = "Thanks for confirming. We'll proceed with scheduling."
+                # Get localized current time
+                timezone_str = interviewer.get('timezone', 'UTC')
+                current_time = get_localized_current_time(timezone_str)
+
+                system_message = f"Thanks for confirming. We'll proceed with scheduling.\n\nCurrent Time: {current_time}"
                 response = self.generate_response(
                     interviewer,
                     None,
@@ -290,7 +285,7 @@ class MessageHandler:
                 # Initiate with the first awaiting interviewee
                 conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
                 for ie in conversation['interviewees']:
-                    if ie['state'] == ConversationState.AWAITING_AVAILABILITY.value:
+                    if (ie['state'] == ConversationState.AWAITING_AVAILABILITY.value):
                         self.initiate_conversation_with_interviewee(conversation_id, ie['number'])
                         break
             else:
@@ -316,7 +311,11 @@ class MessageHandler:
                         )
 
                     slots_text = "\n".join(formatted_slots)
-                    system_message = f"New time slots identified:\n\n{slots_text}\n\nReply 'yes' to confirm or 'no' to provide different slots."
+
+                    # Get localized current time
+                    current_time = get_localized_current_time(timezone)
+
+                    system_message = f"New time slots identified:\n\n{slots_text}\n\nReply 'yes' to confirm or 'no' to provide different slots.\n\nCurrent Time: {current_time}"
                     response = self.generate_response(
                         interviewer,
                         None,
@@ -332,7 +331,11 @@ class MessageHandler:
                         'interviewer': interviewer
                     })
 
-                    system_message = "Please provide availability in a clear format."
+                    # Get localized current time
+                    timezone_str = interviewer.get('timezone', 'UTC')
+                    current_time = get_localized_current_time(timezone_str)
+
+                    system_message = f"Please provide availability in a clear format.\n\nCurrent Time: {current_time}"
                     response = self.generate_response(
                         interviewer,
                         None,
@@ -365,7 +368,11 @@ class MessageHandler:
                     )
 
                 slots_text = "\n".join(formatted_slots)
-                system_message = f"Identified new time slots:\n\n{slots_text}\n\nReply 'yes' to confirm or 'no' to provide different slots."
+
+                # Get localized current time
+                current_time = get_localized_current_time(timezone)
+
+                system_message = f"Identified new time slots:\n\n{slots_text}\n\nReply 'yes' to confirm or 'no' to provide different slots.\n\nCurrent Time: {current_time}"
                 response = self.generate_response(
                     interviewer,
                     None,
@@ -374,8 +381,13 @@ class MessageHandler:
                 )
                 self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                 self.send_message(interviewer['number'], response)
+                return
             else:
-                system_message = "Could not understand your availability. Provide it in a clear format."
+                # Get localized current time
+                timezone_str = interviewer.get('timezone', 'UTC')
+                current_time = get_localized_current_time(timezone_str)
+
+                system_message = f"Could not understand your availability. Please provide it in a clear format.\n\nCurrent Time: {current_time}"
                 response = self.generate_response(
                     interviewer,
                     None,
@@ -408,7 +420,11 @@ class MessageHandler:
                     )
 
                 slots_text = "\n".join(formatted_slots)
-                system_message = f"Identified these time slots:\n\n{slots_text}\n\nReply 'yes' to confirm or 'no' to provide different slots."
+
+                # Get localized current time
+                current_time = get_localized_current_time(timezone)
+
+                system_message = f"Identified these time slots:\n\n{slots_text}\n\nReply 'yes' to confirm or 'no' to provide different slots.\n\nCurrent Time: {current_time}"
                 response = self.generate_response(
                     interviewer,
                     None,
@@ -418,7 +434,11 @@ class MessageHandler:
                 self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                 self.send_message(interviewer['number'], response)
             else:
-                system_message = "Could not understand your availability. Please provide it in a clear format."
+                # Get localized current time
+                timezone_str = interviewer.get('timezone', 'UTC')
+                current_time = get_localized_current_time(timezone_str)
+
+                system_message = f"Could not understand your availability. Please provide it in a clear format.\n\nCurrent Time: {current_time}"
                 response = self.generate_response(
                     interviewer,
                     None,
@@ -463,7 +483,11 @@ class MessageHandler:
                 'interviewees': conversation['interviewees']
             })
 
-            system_message = f"Hello {interviewee['name']}, please let me know your timezone to proceed."
+            # Get localized current time
+            timezone_str = 'UTC'
+            current_time = get_localized_current_time(timezone_str)
+
+            system_message = f"Hello {interviewee['name']}, please let me know your timezone to proceed.\n\nCurrent Time: {current_time}"
             response = self.generate_response(
                 interviewee,
                 None,
@@ -476,7 +500,7 @@ class MessageHandler:
 
     def handle_message_from_interviewee(self, conversation_id, interviewee, message):
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
-        interviewer = conversation['interviewer']
+        interviewer = conversation.get('interviewer')
 
         if not interviewee.get('timezone'):
             extracted_data = extract_slots_and_timezone(
@@ -497,7 +521,11 @@ class MessageHandler:
                 })
                 self.scheduler.process_scheduling_for_interviewee(conversation_id, interviewee['number'])
             else:
-                system_message = "Please specify your timezone."
+                # Get localized current time
+                timezone_str = 'UTC'
+                current_time = get_localized_current_time(timezone_str)
+
+                system_message = f"Please specify your timezone.\n\nCurrent Time: {current_time}"
                 response = self.generate_response(
                     interviewee,
                     None,
@@ -526,6 +554,7 @@ class MessageHandler:
                 })
                 self.scheduler.finalize_scheduling_for_interviewee(conversation_id, interviewee['number'])
             else:
+                # Archive the denied slot
                 proposed_slot = interviewee.get('proposed_slot')
                 if proposed_slot:
                     archived_slots = conversation.get('archived_slots', [])
@@ -533,18 +562,71 @@ class MessageHandler:
                     interviewee['proposed_slot'] = None
                     for i, ie in enumerate(conversation['interviewees']):
                         if ie['number'] == interviewee['number']:
-                            conversation['interviewees'][i] = interviewee
+                            conversation['interviewees'][i] = ie
 
                     self.scheduler.mongodb_handler.update_conversation(conversation_id, {
                         'archived_slots': archived_slots,
                         'interviewees': conversation['interviewees']
                     })
 
-                # Offer another slot
-                self.scheduler.process_scheduling_for_interviewee(conversation_id, interviewee['number'])
+                # Find next unscheduled interviewee who hasn't been offered all slots
+                next_interviewee = None
+                available_slots = conversation.get('available_slots', [])
+                for ie in conversation['interviewees']:
+                    if (ie['state'] not in [ConversationState.SCHEDULED.value, ConversationState.CANCELLED.value, 
+                                        ConversationState.NO_SLOTS_AVAILABLE.value] and
+                        ie['number'] != interviewee['number']):
+                        offered_slots = ie.get('offered_slots', [])
+                        if any(slot not in offered_slots for slot in available_slots):
+                            next_interviewee = ie
+                            break
+
+                if next_interviewee:
+                    # Process scheduling for next interviewee
+                    self.scheduler.process_scheduling_for_interviewee(conversation_id, next_interviewee['number'])
+                else:
+                    # All slots have been offered to all interviewees, now ask interviewer for more slots
+                    # Mark current interviewee as NO_SLOTS_AVAILABLE
+                    interviewee['state'] = ConversationState.NO_SLOTS_AVAILABLE.value
+                    for i, ie in enumerate(conversation['interviewees']):
+                        if ie['number'] == interviewee['number']:
+                            conversation['interviewees'][i] = interviewee
+
+                    self.scheduler.mongodb_handler.update_conversation(conversation_id, {
+                        'interviewees': conversation['interviewees']
+                    })
+
+                    # Ask interviewer for more slots
+                    interviewer['state'] = ConversationState.AWAITING_MORE_SLOTS_FROM_INTERVIEWER.value
+                    self.scheduler.mongodb_handler.update_conversation(conversation_id, {
+                        'interviewer': interviewer,
+                        'asked_for_more_slots': True
+                    })
+
+                    # Notify interviewer
+                    timezone_str = interviewer.get('timezone', 'UTC')
+                    current_time = get_localized_current_time(timezone_str)
+                    
+                    # Get list of unscheduled interviewees
+                    unscheduled = [ie['name'] for ie in conversation['interviewees'] 
+                                if ie['state'] == ConversationState.NO_SLOTS_AVAILABLE.value]
+                    
+                    system_message = (
+                        f"All available slots have been offered to interviewees. The following interviewees "
+                        f"could not be scheduled: {', '.join(unscheduled)}. Could you please provide more "
+                        f"availability?\n\nCurrent Time: {current_time}"
+                    )
+                    response = self.generate_response(
+                        interviewer,
+                        None,
+                        "",
+                        system_message,
+                        conversation_state=interviewer['state']
+                    )
+                    self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
+                    self.send_message(interviewer['number'], response)
         else:
             # Handle other states or regular messages
-            # (Implement as needed)
             pass
 
     def handle_query(self, conversation_id, participant, message):
@@ -554,11 +636,15 @@ class MessageHandler:
         else:
             other_participant = conversation.get('interviewer')
 
+        # Get localized current time
+        timezone_str = participant.get('timezone', 'UTC')
+        current_time = get_localized_current_time(timezone_str)
+
         response = self.generate_response(
             participant,
             None,
             message,
-            system_message="",
+            system_message=f"Your query has been received.\n\nCurrent Time: {current_time}",
             conversation_state=participant.get('state'),
             message_type='answer_query'
         )
@@ -576,7 +662,11 @@ class MessageHandler:
                                 if ie['name'].lower() == interviewee_name), None)
 
             if not interviewee:
-                system_message = f"No interviewee named '{interviewee_name}' found."
+                # Get localized current time
+                timezone_str = interviewer.get('timezone', 'UTC')
+                current_time = get_localized_current_time(timezone_str)
+
+                system_message = f"No interviewee named '{interviewee_name}' found.\n\nCurrent Time: {current_time}"
                 response = self.generate_response(interviewer, None, message, system_message)
                 self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                 self.send_message(interviewer['number'], response)
@@ -596,21 +686,33 @@ class MessageHandler:
                         'interviewees': conversation['interviewees']
                     })
 
-                    cancel_message = f"The meeting between {interviewer['name']} and {interviewee['name']} has been cancelled."
+                    # Get localized current time
+                    timezone_str = interviewer.get('timezone', 'UTC')
+                    current_time = get_localized_current_time(timezone_str)
+
+                    cancel_message = f"The meeting between {interviewer['name']} and {interviewee['name']} has been cancelled.\n\nCurrent Time: {current_time}"
                     self.send_message(interviewer['number'], cancel_message)
                     self.send_message(interviewee['number'], cancel_message)
 
-                    system_message = f"Cancelled the meeting with {interviewee['name']}."
+                    system_message = f"Cancelled the meeting with {interviewee['name']}.\n\nCurrent Time: {current_time}"
                     response = self.generate_response(interviewer, None, message, system_message)
                     self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                     self.send_message(interviewer['number'], response)
                 else:
-                    system_message = "Failed to cancel due to an internal error."
+                    # Get localized current time
+                    timezone_str = interviewer.get('timezone', 'UTC')
+                    current_time = get_localized_current_time(timezone_str)
+
+                    system_message = f"Failed to cancel due to an internal error.\n\nCurrent Time: {current_time}"
                     response = self.generate_response(interviewer, None, message, system_message)
                     self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                     self.send_message(interviewer['number'], response)
             else:
-                system_message = "No scheduled meeting found with that interviewee."
+                # Get localized current time
+                timezone_str = interviewer.get('timezone', 'UTC')
+                current_time = get_localized_current_time(timezone_str)
+
+                system_message = f"No scheduled meeting found with that interviewee.\n\nCurrent Time: {current_time}"
                 response = self.generate_response(interviewer, None, message, system_message)
                 self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                 self.send_message(interviewer['number'], response)
@@ -622,15 +724,19 @@ class MessageHandler:
 
             # Check if conversation is complete
             if self.is_conversation_complete(conversation):
-                self.scheduler.complete_conversation(conversation_id)
+                self.complete_conversation(conversation_id)
 
         else:
+            # Get localized current time
+            timezone_str = interviewer.get('timezone', 'UTC')
+            current_time = get_localized_current_time(timezone_str)
+
             interviewer['state'] = ConversationState.AWAITING_CANCELLATION_INTERVIEWEE_NAME.value
             self.scheduler.mongodb_handler.update_conversation(conversation_id, {
                 'interviewer': interviewer
             })
 
-            system_message = "Please provide the name of the interviewee to cancel."
+            system_message = f"Please provide the name of the interviewee to cancel.\n\nCurrent Time: {current_time}"
             response = self.generate_response(interviewer, None, message, system_message)
             self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
             self.send_message(interviewer['number'], response)
@@ -664,42 +770,59 @@ class MessageHandler:
                             'interviewees': conversation['interviewees']
                         })
 
-                        cancel_message = f"The meeting between {interviewer['name']} and {interviewee_obj['name']} has been cancelled."
+                        # Get localized current time
+                        timezone_str = interviewer.get('timezone', 'UTC')
+                        current_time = get_localized_current_time(timezone_str)
+
+                        cancel_message = f"The meeting between {interviewer['name']} and {interviewee_obj['name']} has been cancelled.\n\nCurrent Time: {current_time}"
                         self.send_message(interviewer['number'], cancel_message)
                         self.send_message(interviewee_obj['number'], cancel_message)
 
-                        system_message = f"Cancelled the meeting with {interviewee_obj['name']}."
+                        system_message = f"Cancelled the meeting with {interviewee_obj['name']}.\n\nCurrent Time: {current_time}"
                         response = self.generate_response(interviewee_obj, None, message, system_message)
                         self.scheduler.log_conversation(conversation_id, interviewee_obj['number'], "system", response, "AI")
                         self.send_message(interviewee_obj['number'], response)
                     else:
-                        system_message = "Failed to cancel due to an internal error."
+                        # Get localized current time
+                        timezone_str = interviewer.get('timezone', 'UTC')
+                        current_time = get_localized_current_time(timezone_str)
+
+                        system_message = f"Failed to cancel due to an internal error.\n\nCurrent Time: {current_time}"
                         response = self.generate_response(interviewee_obj,None, message, system_message)
                         self.scheduler.log_conversation(conversation_id, interviewee_obj['number'], "system", response, "AI")
                         self.send_message(interviewee_obj['number'], response)
                 else:
-                    system_message = "No scheduled meeting found with that interviewee."
+                    # Get localized current time
+                    timezone_str = interviewer.get('timezone', 'UTC')
+                    current_time = get_localized_current_time(timezone_str)
+
+                    system_message = f"No scheduled meeting found with that interviewee.\n\nCurrent Time: {current_time}"
                     response = self.generate_response(interviewee_obj, None, message, system_message)
                     self.scheduler.log_conversation(conversation_id, interviewee_obj['number'], "system", response, "AI")
                     self.send_message(interviewee_obj['number'], response)
-
-                # Check if conversation is complete
-                if self.is_conversation_complete(conversation):
-                    self.scheduler.complete_conversation(conversation_id)
             else:
+                # Get localized current time
+                timezone_str = interviewer.get('timezone', 'UTC')
+                current_time = get_localized_current_time(timezone_str)
+
                 # Extracted name does not match any interviewee
-                system_message = "No interviewee found with that name. Please provide a valid interviewee's name to cancel."
-                response = self.generate_response(interviewee, None, message, system_message)
-                self.scheduler.log_conversation(conversation_id, interviewee['number'], "system", response, "AI")
-                self.send_message(interviewee['number'], response)
+                system_message = f"No interviewee found with that name. Please provide a valid interviewee's name to cancel.\n\nCurrent Time: {current_time}"
+                response = self.generate_response(interviewee_obj, None, message, system_message)
+                self.scheduler.log_conversation(conversation_id, interviewee_obj['number'], "system", response, "AI")
+                self.send_message(interviewee_obj['number'], response)
         else:
             # Step 3: Name not found in the message, prompt for it
+
+            # Get localized current time
+            timezone_str = interviewee.get('timezone', 'UTC')
+            current_time = get_localized_current_time(timezone_str)
+
             interviewee['state'] = ConversationState.AWAITING_INTERVIEWEE_NAME.value
             self.scheduler.mongodb_handler.update_conversation(conversation_id, {
                 'interviewees': conversation['interviewees']
             })
 
-            system_message = "Please provide the name of the interviewee whose interview you wish to cancel."
+            system_message = f"Please provide the name of the interviewee whose interview you wish to cancel.\n\nCurrent Time: {current_time}"
             response = self.generate_response(interviewee, None, message, system_message)
             self.scheduler.log_conversation(conversation_id, interviewee['number'], "system", response, "AI")
             self.send_message(interviewee['number'], response)
@@ -708,7 +831,11 @@ class MessageHandler:
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         scheduled_interviewees = [ie for ie in conversation['interviewees'] if ie.get('event_id')]
         if not scheduled_interviewees:
-            system_message = "No scheduled meeting found to reschedule."
+            # Get localized current time
+            timezone_str = interviewer.get('timezone', 'UTC')
+            current_time = get_localized_current_time(timezone_str)
+
+            system_message = f"No scheduled meeting found to reschedule.\n\nCurrent Time: {current_time}"
             response = self.generate_response(
                 interviewer,
                 None,
@@ -736,10 +863,28 @@ class MessageHandler:
                         'interviewees': conversation['interviewees']
                     })
 
+                    # Get localized current time
+                    timezone_str = interviewer.get('timezone', 'UTC')
+                    current_time = get_localized_current_time(timezone_str)
+
                     # Attempt scheduling again
+                    system_message = f"Rescheduling the meeting with {interviewee['name']}.\n\nCurrent Time: {current_time}"
+                    response = self.generate_response(
+                        interviewer,
+                        None,
+                        message,
+                        system_message
+                    )
+                    self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
+                    self.send_message(interviewer['number'], response)
+
                     self.scheduler.process_scheduling_for_interviewee(conversation_id, interviewee['number'])
                 else:
-                    system_message = "Failed to reschedule due to an internal error."
+                    # Get localized current time
+                    timezone_str = interviewer.get('timezone', 'UTC')
+                    current_time = get_localized_current_time(timezone_str)
+
+                    system_message = f"Failed to reschedule due to an internal error. Please try again later.\n\nCurrent Time: {current_time}"
                     response = self.generate_response(
                         interviewer,
                         None,
@@ -749,7 +894,11 @@ class MessageHandler:
                     self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                     self.send_message(interviewer['number'], response)
             else:
-                system_message = "No scheduled meeting found for that participant."
+                # Get localized current time
+                timezone_str = interviewer.get('timezone', 'UTC')
+                current_time = get_localized_current_time(timezone_str)
+
+                system_message = f"No scheduled meeting found for that participant.\n\nCurrent Time: {current_time}"
                 response = self.generate_response(
                     interviewer,
                     None,
@@ -759,11 +908,16 @@ class MessageHandler:
                 self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                 self.send_message(interviewer['number'], response)
         else:
+            # Get localized current time
+            timezone_str = interviewer.get('timezone', 'UTC')
+            current_time = get_localized_current_time(timezone_str)
+
             interviewer['state'] = ConversationState.AWAITING_CANCELLATION_INTERVIEWEE_NAME.value
             self.scheduler.mongodb_handler.update_conversation(conversation_id, {
                 'interviewer': interviewer
             })
-            system_message = "Multiple scheduled interviews. Provide the interviewee name to reschedule."
+
+            system_message = f"Multiple scheduled interviews found. Please provide the interviewee's name to reschedule.\n\nCurrent Time: {current_time}"
             response = self.generate_response(
                 interviewer,
                 None,
@@ -775,12 +929,12 @@ class MessageHandler:
 
     def handle_reschedule_request_interviewee(self, conversation_id, interviewee, message):
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
-        interviewer = conversation.get('interviewer')
 
         event_id = interviewee.get('event_id')
         if event_id:
             delete_success = self.scheduler.calendar_service.delete_event(event_id)
             if delete_success:
+                # Clear event_id and update interviewee state
                 for i, ie in enumerate(conversation['interviewees']):
                     if ie['number'] == interviewee['number']:
                         ie['event_id'] = None
@@ -792,192 +946,27 @@ class MessageHandler:
                 })
                 self.scheduler.process_scheduling_for_interviewee(conversation_id, interviewee['number'])
             else:
-                system_message = "Failed to reschedule due to an internal error. Please try again later."
+                # Get localized current time
+                timezone_str = interviewee.get('timezone', 'UTC')
+                current_time = get_localized_current_time(timezone_str)
+
+                system_message = f"Failed to reschedule due to an internal error. Please try again later.\n\nCurrent Time: {current_time}"
                 response = self.generate_response(interviewee, None, message, system_message)
                 self.scheduler.log_conversation(conversation_id, interviewee['number'], "system", response, "AI")
                 self.send_message(interviewee['number'], response)
         else:
-            system_message = "No scheduled meeting found to reschedule."
+            # Get localized current time
+            timezone_str = interviewee.get('timezone', 'UTC')
+            current_time = get_localized_current_time(timezone_str)
+
+            system_message = f"No scheduled meeting found to reschedule.\n\nCurrent Time: {current_time}"
             response = self.generate_response(interviewee, None, message, system_message)
             self.scheduler.log_conversation(conversation_id, interviewee['number'], "system", response, "AI")
             self.send_message(interviewee['number'], response)
 
         # Check if conversation is complete
         if self.is_conversation_complete(conversation):
-            self.scheduler.complete_conversation(conversation_id)
-
-    def handle_add_slot_request(self, conversation_id, interviewer, message):
-        conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
-        available_slots = conversation.get('available_slots', [])
-        slot_str_list = [[slot['start_time'], slot['end_time']] for slot in available_slots]
-        slot_info = self.llm_model.extract_slot_info(message, slot_str_list)
-
-        if not slot_info or 'start_time' not in slot_info:
-            system_message = "Could not understand the slot details. Please specify a valid time slot."
-            response = self.generate_response(interviewer, None, message, system_message)
-            self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
-            self.send_message(interviewer['number'], response)
-            return
-
-        start_time_str = slot_info['start_time']
-        try:
-            start_dt = datetime.fromisoformat(start_time_str)
-        except:
-            system_message = "Invalid slot time format. Please provide a valid ISO datetime."
-            response = self.generate_response(interviewer, None, message, system_message)
-            self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
-            self.send_message(interviewer['number'], response)
-            return
-
-        duration = interviewer['meeting_duration']
-        end_dt = start_dt + timedelta(minutes=duration)
-        new_slot = {
-            'start_time': start_dt.isoformat(),
-            'end_time': end_dt.isoformat()
-        }
-
-        # Check conflicts
-        for ie in conversation['interviewees']:
-            if ie.get('scheduled_slot'):
-                scheduled_start = datetime.fromisoformat(ie['scheduled_slot']['start_time'])
-                scheduled_end = datetime.fromisoformat(ie['scheduled_slot']['end_time'])
-                if not (end_dt <= scheduled_start or start_dt >= scheduled_end):
-                    system_message = "This slot overlaps with an already scheduled interview. Please choose another slot."
-                    response = self.generate_response(interviewer, None, message, system_message)
-                    self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
-                    self.send_message(interviewer['number'], response)
-                    return
-
-        available_slots.append(new_slot)
-        self.scheduler.mongodb_handler.update_conversation(conversation_id, {
-            'available_slots': available_slots
-        })
-
-        system_message = "Slot added successfully."
-        response = self.generate_response(interviewer, None, message, system_message)
-        self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
-        self.send_message(interviewer['number'], response)
-
-    def handle_remove_slot_request(self, conversation_id, interviewer, message):
-        conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
-        available_slots = conversation.get('available_slots', [])
-        slot_str_list = [[slot['start_time'], slot['end_time']] for slot in available_slots]
-        slot_info = self.llm_model.extract_slot_info(message, slot_str_list)
-
-        if not slot_info or 'start_time' not in slot_info:
-            system_message = "Could not understand which slot to remove. Please specify the exact slot start time."
-            response = self.generate_response(interviewer, None, message, system_message)
-            self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
-            self.send_message(interviewer['number'], response)
-            return
-
-        start_time_str = slot_info['start_time']
-        slot_to_remove = next((s for s in available_slots if s['start_time'] == start_time_str), None)
-
-        if not slot_to_remove:
-            system_message = "No matching available slot found for that time."
-            response = self.generate_response(interviewer, None, message, system_message)
-            self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
-            self.send_message(interviewer['number'], response)
-            return
-
-        # Check if scheduled
-        for ie in conversation['interviewees']:
-            if ie.get('scheduled_slot') and ie['scheduled_slot']['start_time'] == start_time_str:
-                system_message = "This slot is already scheduled with an interviewee. Please cancel that interview first."
-                response = self.generate_response(interviewer, None, message, system_message)
-                self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
-                self.send_message(interviewer['number'], response)
-                return
-
-        available_slots.remove(slot_to_remove)
-        self.scheduler.mongodb_handler.update_conversation(conversation_id, {
-            'available_slots': available_slots
-        })
-
-        system_message = "Slot removed successfully."
-        response = self.generate_response(interviewer, None, message, system_message)
-        self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
-        self.send_message(interviewer['number'], response)
-
-    def handle_update_slot_request(self, conversation_id, interviewer, message):
-        conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
-        available_slots = conversation.get('available_slots', [])
-        slot_str_list = [[slot['start_time'], slot['end_time']] for slot in available_slots]
-        slot_info = self.llm_model.extract_slot_info_for_update(message, slot_str_list)
-
-        if not slot_info or 'old_start_time' not in slot_info or 'new_start_time' not in slot_info:
-            system_message = "Could not understand which slot to update. Please specify the original slot and the new time."
-            response = self.generate_response(interviewer, None, message, system_message)
-            self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
-            self.send_message(interviewer['number'], response)
-            return
-
-        old_start_time = slot_info['old_start_time']
-        new_start_time = slot_info['new_start_time']
-
-        old_slot = next((s for s in available_slots if s['start_time'] == old_start_time), None)
-        if not old_slot:
-            system_message = "No matching available slot found to update."
-            response = self.generate_response(interviewer, None, message, system_message)
-            self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
-            self.send_message(interviewer['number'], response)
-            return
-
-        # Check if slot is scheduled
-        for ie in conversation['interviewees']:
-            if ie.get('scheduled_slot') and ie['scheduled_slot']['start_time'] == old_start_time:
-                system_message = "This slot is already scheduled with an interviewee. Please cancel that interview first."
-                response = self.generate_response(interviewer, None, message, system_message)
-                self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
-                self.send_message(interviewer['number'], response)
-                return
-
-        try:
-            start_dt = datetime.fromisoformat(new_start_time)
-        except:
-            system_message = "Invalid new slot time format."
-            response = self.generate_response(interviewer, None, message, system_message)
-            self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
-            self.send_message(interviewer['number'], response)
-            return
-
-        duration = interviewer['meeting_duration']
-        end_dt = start_dt + timedelta(minutes=duration)
-        new_slot = {
-            'start_time': start_dt.isoformat(),
-            'end_time': end_dt.isoformat()
-        }
-
-        available_slots.remove(old_slot)
-        available_slots.append(new_slot)
-        self.scheduler.mongodb_handler.update_conversation(conversation_id, {
-            'available_slots': available_slots
-        })
-
-        system_message = "Slot updated successfully."
-        response = self.generate_response(interviewer, None, message, system_message)
-        self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
-        self.send_message(interviewer['number'], response)
-
-    def handle_meeting_duration_change_request(self, conversation_id, interviewer, message):
-        new_duration = self.llm_model.extract_meeting_duration(message)
-        if not new_duration or new_duration <= 0:
-            system_message = "Could not understand the new meeting duration. Please specify a positive duration in minutes."
-            response = self.generate_response(interviewer, None, message, system_message)
-            self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
-            self.send_message(interviewer['number'], response)
-            return
-
-        success = self.scheduler.change_meeting_duration(conversation_id, new_duration)
-        if success:
-            system_message = f"Meeting duration changed to {new_duration} minutes. All slots and scheduled interviews have been updated accordingly."
-        else:
-            system_message = "Failed to change meeting duration due to an internal error."
-
-        response = self.generate_response(interviewer, None, message, system_message)
-        self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
-        self.send_message(interviewer['number'], response)
+            self.complete_conversation(conversation_id)
 
     def is_conversation_complete(self, conversation: Dict[str, Any]) -> bool:
         """
@@ -1004,7 +993,11 @@ class MessageHandler:
             logger.error(f"Participant {participant_id} not found in conversation {conversation_id} for reminder.")
             return
 
-        system_message = "Hello, we haven't heard from you. Could you please provide an update?"
+        # Get localized current time
+        timezone_str = participant.get('timezone', 'UTC')
+        current_time = get_localized_current_time(timezone_str)
+
+        system_message = f"Hello, we haven't heard from you. Could you please provide an update?\n\nCurrent Time: {current_time}"
         response = self.generate_response(
             participant,
             None,
@@ -1014,3 +1007,97 @@ class MessageHandler:
         )
         self.scheduler.log_conversation(conversation_id, participant_id, "system", response, "AI")
         self.send_message(participant['number'], response)
+
+    def handle_timezone_clarification_response(self, conversation_id: str, participant: dict, message: str) -> None:
+        """
+        Handle timezone clarification responses from participants.
+        """
+        try:
+            # First try to extract city
+            city = extract_city_from_message(message)
+            if city and city.lower() != 'unspecified':
+                timezone = extract_timezone_from_city(city)
+                if timezone and timezone.lower() != 'unspecified':
+                    self.update_participant_timezone(conversation_id, participant, timezone)
+                    return
+
+            # If city extraction fails, try to extract timezone from availability message
+            extracted_data = extract_slots_and_timezone(
+                message,
+                participant['number'],
+                participant['conversation_history'],
+                participant['meeting_duration']
+            )
+            
+            timezone = extracted_data.get('timezone')
+            if timezone and timezone.lower() != 'unspecified':
+                self.update_participant_timezone(conversation_id, participant, timezone)
+                return
+
+            # If all methods fail, ask for explicit timezone
+            current_time = get_localized_current_time('UTC')
+            system_message = (
+                "I couldn't determine your timezone. Please provide your timezone explicitly "
+                "(e.g., 'America/New_York', 'Asia/Kolkata', 'Europe/London').\n\n"
+                f"Current Time: {current_time}"
+            )
+            response = self.generate_response(
+                participant,
+                None,
+                "",
+                system_message,
+                conversation_state=ConversationState.TIMEZONE_CLARIFICATION.value
+            )
+            self.scheduler.log_conversation(conversation_id, participant['number'], "system", response, "AI")
+            self.send_message(participant['number'], response)
+
+        except Exception as e:
+            logger.error(f"Error handling timezone clarification for participant {participant['number']}: {str(e)}")
+            logger.error(traceback.format_exc())
+            self.update_participant_timezone(conversation_id, participant, 'UTC')
+
+    def update_participant_timezone(self, conversation_id: str, participant: dict, timezone: str) -> None:
+        """
+        Update participant's timezone and transition to next state.
+        """
+        try:
+            conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
+            if not conversation:
+                return
+
+            if participant['role'] == 'interviewer':
+                conversation['interviewer']['timezone'] = timezone
+                conversation['interviewer']['state'] = ConversationState.AWAITING_AVAILABILITY.value
+                self.scheduler.mongodb_handler.update_conversation(conversation_id, {
+                    'interviewer': conversation['interviewer']
+                })
+            else:
+                for i, ie in enumerate(conversation['interviewees']):
+                    if ie['number'] == participant['number']:
+                        ie['timezone'] = timezone
+                        ie['state'] = ConversationState.AWAITING_AVAILABILITY.value
+                        conversation['interviewees'][i] = ie
+                self.scheduler.mongodb_handler.update_conversation(conversation_id, {
+                    'interviewees': conversation['interviewees']
+                })
+
+            # Send confirmation message
+            current_time = get_localized_current_time(timezone)
+            system_message = (
+                f"Thank you! I've set your timezone to {timezone}. "
+                f"Now, please share your availability for the upcoming interviews.\n\n"
+                f"Current Time: {current_time}"
+            )
+            response = self.generate_response(
+                participant,
+                None,
+                "",
+                system_message,
+                conversation_state=ConversationState.AWAITING_AVAILABILITY.value
+            )
+            self.scheduler.log_conversation(conversation_id, participant['number'], "system", response, "AI")
+            self.send_message(participant['number'], response)
+
+        except Exception as e:
+            logger.error(f"Error updating timezone for participant {participant['number']}: {str(e)}")
+            logger.error(traceback.format_exc())

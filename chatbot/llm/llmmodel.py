@@ -274,32 +274,39 @@ Answer the participant's question in a professional and concise manner.
     
     def extract_slot_info(self, user_message, available_slots):
         """
-        Extract slot information (start_time and end_time) from the user message.
+        Extract multiple slot information (start_time and end_time) from the user message.
 
         Args:
             user_message (str): The user's natural language message.
+            available_slots (list): List of current available slots for reference.
 
         Returns:
-            dict: A dictionary containing 'start_time' and 'end_time' if extraction is successful, else None.
+            list: A list of dictionaries, each containing 'start_time' and 'end_time'.
         """
         try:
-            json1="""
-                {{
+            json_template = """
+                [
+                    {{
                         "start_time": "YYYY-MM-DDTHH:MM:SS",
                         "end_time": "YYYY-MM-DDTHH:MM:SS"
-                }}
+                    }},
+                    {{
+                        "start_time": "YYYY-MM-DDTHH:MM:SS",
+                        "end_time": "YYYY-MM-DDTHH:MM:SS"
+                    }}
+                ]
             """
             PROMPT_TEMPLATE = f"""
-                Extract the slot information from the following message.
+                Extract all slot information from the following message.
 
                 **Input Message**:
                 {user_message}
 
-                **Available Slots for reference**
+                **Available Slots for Reference**:
                 {available_slots}
 
-                **Output Format (dont include anything in the output other than json)**:
-                {json1}
+                **Output Format (Do not include anything other than JSON array of slots)**:
+                {json_template}
             """
 
             prompt = PromptTemplate(
@@ -326,20 +333,25 @@ Answer the participant's question in a professional and concise manner.
                 logger.error("Failed to extract slot information from the response.")
                 return None
 
-            # Validate the extracted data
-            if 'start_time' not in parsed_data or 'end_time' not in parsed_data:
-                logger.error("Extracted slot information is incomplete.")
+            # Validate each slot in the list
+            valid_slots = []
+            for slot in parsed_data:
+                if 'start_time' not in slot or 'end_time' not in slot:
+                    logger.error("One of the extracted slots is incomplete.")
+                    continue
+                try:
+                    datetime.fromisoformat(slot['start_time'])
+                    datetime.fromisoformat(slot['end_time'])
+                    valid_slots.append(slot)
+                except ValueError:
+                    logger.error(f"Invalid datetime format in slot: {slot}")
+                    continue
+
+            if not valid_slots:
+                logger.error("No valid slots were extracted.")
                 return None
 
-            # Optionally, validate the datetime format
-            try:
-                datetime.fromisoformat(parsed_data['start_time'])
-                datetime.fromisoformat(parsed_data['end_time'])
-            except ValueError:
-                logger.error("Extracted datetime format is invalid.")
-                return None
-
-            return parsed_data
+            return valid_slots
 
         except Exception as e:
             logger.error(f"Error in extract_slot_info: {str(e)}")
@@ -347,32 +359,39 @@ Answer the participant's question in a professional and concise manner.
 
     def extract_slot_info_for_update(self, user_message, available_slots):
         """
-        Extract slot information (old_start_time and new_start_time) from the user message for updating a slot.
+        Extract multiple slot update information (old_start_time and new_start_time) from the user message.
 
         Args:
             user_message (str): The user's natural language message.
+            available_slots (list): List of current available slots for reference.
 
         Returns:
-            dict: A dictionary containing 'old_start_time' and 'new_start_time' if extraction is successful, else None.
+            list: A list of dictionaries, each containing 'old_start_time' and 'new_start_time'.
         """
         try:
-            json1="""
-                {{
-                    "old_start_time": "YYYY-MM-DDTHH:MM:SS",
-                    "new_start_time": "YYYY-MM-DDTHH:MM:SS"
-                }}
+            json_template = """
+                [
+                    {{
+                        "old_start_time": "YYYY-MM-DDTHH:MM:SS",
+                        "new_start_time": "YYYY-MM-DDTHH:MM:SS"
+                    }},
+                    {{
+                        "old_start_time": "YYYY-MM-DDTHH:MM:SS",
+                        "new_start_time": "YYYY-MM-DDTHH:MM:SS"
+                    }}
+                ]
             """
             PROMPT_TEMPLATE = f"""
-                Extract the slot information for updating from the following message.
+                Extract all slot update information from the following message.
 
                 **Input Message**:
                 {user_message}
 
-                **Available Slots for reference**
+                **Available Slots for Reference**:
                 {available_slots}
 
-                **Output Format**:
-                {json1}
+                **Output Format (Do not include anything other than JSON array of slot updates)**:
+                {json_template}
             """
 
             prompt = PromptTemplate(
@@ -399,25 +418,29 @@ Answer the participant's question in a professional and concise manner.
                 logger.error("Failed to extract slot update information from the response.")
                 return None
 
-            # Validate the extracted data
-            if 'old_start_time' not in parsed_data or 'new_start_time' not in parsed_data:
-                logger.error("Extracted slot update information is incomplete.")
+            # Validate each slot update in the list
+            valid_slot_updates = []
+            for slot in parsed_data:
+                if 'old_start_time' not in slot or 'new_start_time' not in slot:
+                    logger.error("One of the extracted slot updates is incomplete.")
+                    continue
+                try:
+                    datetime.fromisoformat(slot['old_start_time'])
+                    datetime.fromisoformat(slot['new_start_time'])
+                    valid_slot_updates.append(slot)
+                except ValueError:
+                    logger.error(f"Invalid datetime format in slot update: {slot}")
+                    continue
+
+            if not valid_slot_updates:
+                logger.error("No valid slot updates were extracted.")
                 return None
 
-            # Optionally, validate the datetime format
-            try:
-                datetime.fromisoformat(parsed_data['old_start_time'])
-                datetime.fromisoformat(parsed_data['new_start_time'])
-            except ValueError:
-                logger.error("Extracted datetime format is invalid.")
-                return None
-
-            return parsed_data
+            return valid_slot_updates
 
         except Exception as e:
             logger.error(f"Error in extract_slot_info_for_update: {str(e)}")
             return None
-
     
     # def generate_conversational_message(self, participant_name, participant_number, participant_email, participant_role, superior_flag, meeting_duration, role_to_contact_name, role_to_contact_number, role_to_contact_email, company_details, conversation_history, conversation_state, user_message, system_message, other_participant_conversation_history):
     #     PROMPT_TEMPLATE = f"""{PROMPT_TEMPLATES.CONVERSATIONAL_PROMPT_TEMPLATE}"""
