@@ -22,3 +22,5 @@ class ConversationState(Enum):
     TIMEZONE_CLARIFICATION = 'timezone_clarification'
     COMPLETED = 'completed'
     AWAITING_MORE_SLOTS_FROM_INTERVIEWER = 'awaiting_more_slots_from_interviewer'
+    SCHEDULING = "scheduling"
+    AWAITING_RESPONSE = "awaiting_response"

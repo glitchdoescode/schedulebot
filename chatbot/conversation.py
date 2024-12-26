@@ -130,10 +130,6 @@ class InterviewScheduler:
             if flags_dict:
                 self.flag_handler.handle_flags_for_conversation(conversation_id, flags_dict)
 
-    def notify_contact_person(self, conversation_id: str, flagged_participant_id: Optional[str], flag_type: AttentionFlag):
-        # No longer notify contact person; flags are stored in the database
-        pass
-
     def setup_conversation_logger(self):
         self.conversation_logger = logging.getLogger('conversation_history')
         conversation_handler = logging.FileHandler('conversation_history.log')
@@ -411,154 +407,6 @@ Duration - {interviewer['meeting_duration']} minutes
         self.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
         self.message_handler.send_message(interviewer['number'], response)
 
-    def process_scheduling_for_interviewee(self, conversation_id, interviewee_number):
-        """
-        Process scheduling for an interviewee by offering available slots or handling the absence of slots.
-        The conversation data is fetched directly from MongoDB.
-        """
-        try:
-            # Fetch conversation from MongoDB
-            conversation = self.mongodb_handler.get_conversation(conversation_id)
-            if not conversation:
-                logger.error(f"Conversation {conversation_id} not found for scheduling.")
-                return
-
-            interviewer = conversation['interviewer']
-            interviewer_slots = interviewer.get('slots', {})
-
-            # Find the interviewee
-            interviewee = next((ie for ie in conversation['interviewees'] if ie['number'] == interviewee_number), None)
-            if not interviewee:
-                logger.error(f"Interviewee {interviewee_number} not found in conversation {conversation_id}.")
-                return
-
-            # Initialize available_slots and archived_slots if not already done
-            if not conversation.get('available_slots'):
-                conversation['available_slots'] = interviewer_slots.get('time_slots', [])[:]
-                self.mongodb_handler.update_conversation(conversation_id, {
-                    'available_slots': conversation['available_slots']
-                })
-
-            # Prepare the list of slots to offer (excluding those already offered to this interviewee)
-            offered_slots = interviewee.get('offered_slots', [])
-            slots_to_offer = [slot for slot in conversation['available_slots'] if slot not in offered_slots]
-
-            if not slots_to_offer and conversation.get('archived_slots'):
-                # Use archived slots if available
-                slots_to_offer = [slot for slot in conversation['archived_slots'] if slot not in offered_slots]
-
-            if not slots_to_offer:
-                # No more slots to offer
-                asked_for_more_slots = conversation.get('asked_for_more_slots', False)
-
-                if not asked_for_more_slots:
-                    # Ask interviewer for more slots
-                    conversation['asked_for_more_slots'] = True
-                    self.mongodb_handler.update_conversation(conversation_id, {
-                        'asked_for_more_slots': True
-                    })
-
-                    # Set interviewee state to NO_SLOTS_AVAILABLE
-                    interviewee['state'] = ConversationState.NO_SLOTS_AVAILABLE.value
-                    self.mongodb_handler.update_conversation(conversation_id, {
-                        'interviewees': conversation['interviewees']
-                    })
-
-                    # Notify interviewer for more slots
-                    system_message = (
-                        f"Hello {interviewer['name']}, we have run out of available slots for some interviewees. "
-                        f"Could you please provide more availability?"
-                    )
-                    response = self.message_handler.generate_response(
-                        interviewer,
-                        None,
-                        "",
-                        system_message,
-                        conversation_state=interviewer['state']
-                    )
-                    self.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
-                    self.message_handler.send_message(interviewer['number'], response)
-
-                    # Mark interviewer state as AWAITING_MORE_SLOTS_FROM_INTERVIEWER
-                    interviewer['state'] = ConversationState.AWAITING_MORE_SLOTS_FROM_INTERVIEWER.value
-                    self.mongodb_handler.update_conversation(conversation_id, {
-                        'interviewer': interviewer
-                    })
-
-                else:
-                    # Notify unscheduled interviewees
-                    unscheduled_interviewees = [ie for ie in conversation['interviewees']
-                                                if ie['state'] not in [ConversationState.SCHEDULED.value, ConversationState.CANCELLED.value]]
-
-                    for ie in unscheduled_interviewees:
-                        sys_msg = (
-                            "We couldn't find any more available slots for your interview. "
-                            "We will reach out later if new slots become available."
-                        )
-                        resp = self.message_handler.generate_response(
-                            ie,
-                            interviewer,
-                            "",
-                            sys_msg,
-                            conversation_state=ie['state']
-                        )
-                        self.log_conversation(conversation_id, ie['number'], "system", resp, "AI")
-                        self.message_handler.send_message(ie['number'], resp)
-                        ie['state'] = ConversationState.NO_SLOTS_AVAILABLE.value
-
-                    self.mongodb_handler.update_conversation(conversation_id, {
-                        'interviewees': conversation['interviewees']
-                    })
-
-                    # Notify interviewer
-                    sys_msg = "No additional slots provided. We have informed the remaining interviewees that no slots are available."
-                    resp = self.message_handler.generate_response(
-                        interviewer,
-                        None,
-                        "",
-                        sys_msg,
-                        conversation_state=interviewer['state']
-                    )
-                    self.log_conversation(conversation_id, 'interviewer', "system", resp, "AI")
-                    self.message_handler.send_message(interviewer['number'], resp)
-
-                    # Notify role_to_contact_person
-                    self.notify_contact_person(conversation_id, None, AttentionFlag.NO_AVAILABLE_SLOTS)
-
-                return
-
-            # If we have slots_to_offer
-            proposed_slot = slots_to_offer[0]
-            interviewee.setdefault('offered_slots', []).append(proposed_slot)
-            interviewee['proposed_slot'] = proposed_slot
-            interviewee['state'] = ConversationState.CONFIRMATION_PENDING.value
-
-            self.mongodb_handler.update_conversation(conversation_id, {
-                'interviewees': conversation['interviewees']
-            })
-
-            # Localize meeting time to the interviewee's timezone
-            interviewee_timezone = interviewee.get('timezone', 'UTC')
-            meeting_time_utc = datetime.fromisoformat(proposed_slot['start_time'])
-            localized_meeting_time = meeting_time_utc.astimezone(pytz.timezone(interviewee_timezone))
-
-            system_message = f"A proposed meeting time has been identified: {localized_meeting_time.strftime('%A, %B %d, %Y at %I:%M %p %Z')}. Please confirm if this works for you."
-
-            response = self.message_handler.generate_response(
-                interviewee,
-                interviewer,
-                "",
-                system_message,
-                conversation_state=interviewee['state']
-            )
-            self.log_conversation(conversation_id, interviewee_number, "system", response, "AI")
-            self.message_handler.send_message(interviewee['number'], response)
-
-        except Exception as e:
-            logger.error(f"Error processing scheduling for interviewee {interviewee_number} in conversation {conversation_id}: {str(e)}")
-            logger.error(traceback.format_exc())
-
-
     def finalize_scheduling_for_interviewee(self, conversation_id, interviewee_number):
         """Finalize the scheduling after interviewee has confirmed."""
         try:
@@ -765,18 +613,6 @@ Duration - {interviewer['meeting_duration']} minutes
             if ie['state'] not in [ConversationState.SCHEDULED.value, ConversationState.CANCELLED.value]:
                 return False
         return True
-
-    def check_and_complete_conversation(self, conversation_id: str):
-        """
-        Check if a conversation is complete and mark it as such if true.
-        """
-        conversation = self.mongodb_handler.get_conversation(conversation_id)
-        if not conversation:
-            logger.error(f"Conversation {conversation_id} not found for completion check.")
-            return
-
-        if self.is_conversation_complete(conversation):
-            self.complete_conversation(conversation_id)
 
     def initiate_next_conversation_if_available(self, interviewer_number: str):
         conversation_id = self.dequeue_conversation(interviewer_number)
