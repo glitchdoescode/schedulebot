@@ -275,11 +275,8 @@ class InterviewScheduler:
                 'archived_slots': [],
                 'last_response_times': {},
                 'status': 'queued',
-                ### REFACTOR: Track how many times we've asked for more slots
                 'more_slots_requests': 0,
-                ### REFACTOR: Track last time we asked for more slots
                 'last_more_slots_request_time': None,
-                ### REFACTOR: Maintain a dictionary of slot denials
                 'slot_denials': {}
             }
             self.mongodb_handler.create_conversation(conversation_data)
@@ -336,7 +333,6 @@ class InterviewScheduler:
             'archived_slots': [],
             'last_response_times': {},
             'status': 'active',
-            ### REFACTOR: Additional fields for logic
             'more_slots_requests': 0,
             'last_more_slots_request_time': None,
             'slot_denials': {}
@@ -418,6 +414,7 @@ Duration - {interviewer['meeting_duration']} minutes
         self.message_handler.send_message(interviewer['number'], response)
 
     def finalize_scheduling_for_interviewee(self, conversation_id, interviewee_number):
+        """Once an interviewee confirms, do not spam the interviewer. Only notify the interviewee."""
         try:
             conversation = self.mongodb_handler.get_conversation(conversation_id)
             if not conversation:
@@ -449,31 +446,34 @@ Duration - {interviewer['meeting_duration']} minutes
                     'interviewees': conversation['interviewees']
                 })
 
-                # Send confirmation messages
-                for participant in [interviewer, interviewee]:
+                ### ADDED: Only send confirmation to the interviewee, not the interviewer
+                participant = interviewee
+                try:
+                    participant_timezone = participant.get('timezone', 'UTC')
                     try:
-                        participant_timezone = participant.get('timezone', 'UTC')
-                        try:
-                            tz = pytz.timezone(participant_timezone)
-                        except pytz.exceptions.UnknownTimeZoneError:
-                            logger.warning(f"Invalid timezone {participant_timezone}, defaulting to UTC")
-                            tz = pytz.UTC
+                        tz = pytz.timezone(participant_timezone)
+                    except pytz.exceptions.UnknownTimeZoneError:
+                        logger.warning(f"Invalid timezone {participant_timezone}, defaulting to UTC")
+                        tz = pytz.UTC
 
-                        localized_meeting_time = meeting_time_utc.astimezone(tz)
-                        system_message = f"Your meeting has been scheduled for {localized_meeting_time.strftime('%A, %B %d, %Y at %I:%M %p %Z')}."
+                    localized_meeting_time = meeting_time_utc.astimezone(tz)
+                    system_message = (
+                        f"Your meeting has been scheduled for "
+                        f"{localized_meeting_time.strftime('%A, %B %d, %Y at %I:%M %p %Z')}."
+                    )
 
-                        response = self.message_handler.generate_response(
-                            participant,
-                            interviewer if participant['role'] == 'interviewee' else interviewee,
-                            "",
-                            system_message,
-                            conversation_state=participant['state']
-                        )
-                        self.log_conversation(conversation_id, participant['number'], "system", response, "AI")
-                        self.message_handler.send_message(participant['number'], response)
+                    response = self.message_handler.generate_response(
+                        participant,
+                        interviewer,  # so the LLM knows who else is in conversation
+                        "",
+                        system_message,
+                        conversation_state=participant['state']
+                    )
+                    self.log_conversation(conversation_id, participant['number'], "system", response, "AI")
+                    self.message_handler.send_message(participant['number'], response)
 
-                    except Exception as e:
-                        logger.error(f"Error sending confirmation to participant {participant['number']}: {str(e)}")
+                except Exception as e:
+                    logger.error(f"Error sending confirmation to participant {participant['number']}: {str(e)}")
 
                 interviewee['confirmed'] = False
                 interviewee['proposed_slot'] = None
@@ -568,30 +568,59 @@ Duration - {interviewer['meeting_duration']} minutes
             logger.error(f"Error logging conversation: {str(e)}")
 
     def complete_conversation(self, conversation_id: str):
+        """
+        Just before marking conversation completed, send the interviewer a
+        conclusive report about who got scheduled and who did not.
+        """
         conversation = self.mongodb_handler.get_conversation(conversation_id)
         if not conversation:
             logger.error(f"Conversation {conversation_id} not found for completion.")
             return
 
-        timezone_str = conversation['interviewer'].get('timezone', 'UTC')
+        interviewer = conversation['interviewer']
+        interviewer_number = interviewer['number']
+        timezone_str = interviewer.get('timezone', 'UTC')
         current_time = get_localized_current_time(timezone_str)
 
+        ### ADDED: Build conclusive report
+        report_lines = []
+        for ie in conversation['interviewees']:
+            name = ie['name']
+            state = ie['state']
+            if state == ConversationState.SCHEDULED.value and ie.get('scheduled_slot'):
+                # Convert to interviewer's local time
+                start_utc = datetime.fromisoformat(ie['scheduled_slot']['start_time'])
+                try:
+                    tz = pytz.timezone(timezone_str)
+                except pytz.exceptions.UnknownTimeZoneError:
+                    tz = pytz.UTC
+                local_time = start_utc.astimezone(tz)
+                local_time_str = local_time.strftime('%A, %B %d, %Y at %I:%M %p %Z')
+                report_lines.append(f"{name} => Scheduled at {local_time_str}")
+            else:
+                # Not scheduled or canceled
+                report_lines.append(f"{name} => {state.upper()}")
+
+        final_report = "Here is the final interview schedule:\n\n" + "\n".join(report_lines)
+        self.message_handler.send_message(interviewer_number, final_report)
+        self.log_conversation(conversation_id, 'interviewer', "system", final_report, "AI")
+
+        # Now mark conversation as completed
         self.mongodb_handler.update_conversation(
             conversation_id,
             {'status': 'completed', 'completed_at': datetime.now().isoformat()}
         )
-        interviewer_number = conversation['interviewer']['number']
 
         system_message = f"The conversation has been marked as completed.\n\nCurrent Time: {current_time}"
         response = self.message_handler.generate_response(
-            conversation['interviewer'],
+            interviewer,
             None,
             "",
             system_message,
-            conversation_state=conversation['interviewer']['state']
+            conversation_state=interviewer['state']
         )
         self.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
-        self.message_handler.send_message(conversation['interviewer']['number'], response)
+        self.message_handler.send_message(interviewer['number'], response)
 
         self.initiate_next_conversation_if_available(interviewer_number)
         logger.info(f"Conversation {conversation_id} marked as completed.")
