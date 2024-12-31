@@ -384,7 +384,7 @@ class InterviewScheduler:
         timezone_str = interviewer.get('timezone', 'UTC')
         current_time = get_localized_current_time(timezone_str)
 
-        system_message = f"""Say Hello to {interviewer['name']}, and tell him that you are here to assist with scheduling interviews for the upcoming candidates. Also ask them to provide their availability for the coming week.
+        system_message = f"""Say Hello to {interviewer['name']}, and tell him that you are here to assist with scheduling interviews for the upcoming candidates. Also ask them to provide their availability.
 
 Tell them to feel free to share any specific time preferences or constraints and once you have their availability, you’ll coordinate with the candidates.
 
