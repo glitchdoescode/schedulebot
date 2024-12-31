@@ -1,9 +1,8 @@
-# chatbot/message_handler.py
 import logging
 import random
 import time
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from twilio.rest import Client
 from twilio.base.exceptions import TwilioRestException
@@ -29,9 +28,6 @@ class MessageHandler:
         self.llm_model = LLMModel()
 
     def send_message(self, to_number: str, message: str, max_retries: int = 3, initial_retry_delay: float = 1.0) -> bool:
-        """
-        Send a WhatsApp message via Twilio with retry logic.
-        """
         if not to_number.startswith('whatsapp:'):
             to_number = f'whatsapp:{to_number}'
 
@@ -89,7 +85,6 @@ class MessageHandler:
                 )
                 return False
 
-            # Exponential backoff + small jitter
             jitter = random.uniform(0, 0.1) * current_delay
             sleep_time = current_delay + jitter
             logger.debug(f"Retrying in {sleep_time:.2f} seconds...")
@@ -107,14 +102,10 @@ class MessageHandler:
         conversation_state: Optional[str] = None,
         message_type: str = 'generate_message'
     ) -> str:
-        """
-        Use the LLM model to generate system responses or answer queries.
-        """
         conversation_state = conversation_state or participant.get('state')
         conversation_history = " ".join(participant.get('conversation_history', []))
-        other_conversation_history = ""
         if other_participant:
-            other_conversation_history = " ".join(other_participant.get('conversation_history', []))
+            _ = " ".join(other_participant.get('conversation_history', []))
 
         params = {
             'participant_name': participant['name'],
@@ -147,15 +138,11 @@ class MessageHandler:
             return "I'm sorry, something went wrong while processing your request."
 
     def receive_message(self, from_number: str, message: str):
-        """
-        Primary entry point for incoming messages from Twilio.
-        """
         conversation_id, participant, interviewer_number = self.find_conversation_and_participant(from_number, message)
         if not conversation_id or not participant:
             logger.warning(f"No active conversation found for number: {from_number}")
             return
 
-        # Update last response time
         now_utc = datetime.now(pytz.UTC)
         self.scheduler.mongodb_handler.update_conversation(
             conversation_id,
@@ -165,7 +152,6 @@ class MessageHandler:
         self.scheduler.log_conversation_history(conversation_id)
         self.scheduler.log_conversation(conversation_id, participant['number'], "user", message, "Participant")
 
-        # Reload conversation from DB
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
 
         intent = self.llm_model.detect_intent(
@@ -196,16 +182,12 @@ class MessageHandler:
                 self.handle_reschedule_request_interviewee(conversation_id, participant, message)
 
         else:
-            # Regular scheduling flow
             if participant.get('role') == 'interviewer':
                 self.handle_message_from_interviewer(conversation_id, participant, message)
             else:
                 self.handle_message_from_interviewee(conversation_id, participant, message)
 
     def find_conversation_and_participant(self, from_number: str, message: str):
-        """
-        Identify the correct conversation and participant from the DB by phone number.
-        """
         from_number_norm = normalize_number(from_number)
         conversations = self.scheduler.mongodb_handler.find_conversations_by_number(from_number_norm)
 
@@ -219,17 +201,14 @@ class MessageHandler:
                                       if ie['number'] == from_number_norm), None))
             return conversation['conversation_id'], participant, conversation['interviewer']['number']
 
-        # If multiple conversations are found
         active_conversations = [c for c in conversations if c['status'] == 'active']
         if active_conversations:
-            # Take the latest active conversation
             conversation = sorted(active_conversations, key=lambda x: x['created_at'], reverse=True)[0]
             participant = (conversation['interviewer'] if conversation['interviewer']['number'] == from_number_norm
                            else next((ie for ie in conversation['interviewees']
                                       if ie['number'] == from_number_norm), None))
             return conversation['conversation_id'], participant, conversation['interviewer']['number']
 
-        # If no active conversation, check queued
         queued_conversations = [c for c in conversations if c['status'] == 'queued']
         if queued_conversations:
             conversation = sorted(queued_conversations, key=lambda x: x['created_at'], reverse=True)[0]
@@ -241,13 +220,9 @@ class MessageHandler:
         return None, None, None
 
     def handle_message_from_interviewer(self, conversation_id: str, interviewer: dict, message: str):
-        """
-        Handle messages from the interviewer regarding availability slots.
-        """
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
 
         if interviewer.get('state') == ConversationState.AWAITING_SLOT_CONFIRMATION.value:
-            # They previously sent slots and are awaiting confirmation
             confirmation_response = self.llm_model.detect_confirmation(
                 participant_name=interviewer['name'],
                 participant_role=interviewer.get('role', ''),
@@ -258,7 +233,6 @@ class MessageHandler:
             )
 
             if confirmation_response.get('confirmed'):
-                # Confirm the newly provided slots
                 temp_slots = interviewer.get('temp_slots')
                 if not temp_slots:
                     timezone_str = interviewer.get('timezone', 'UTC')
@@ -275,7 +249,6 @@ class MessageHandler:
                 available_slots = conversation.get('available_slots', [])
                 new_slots = temp_slots.get('time_slots', [])
                 existing_slot_keys = {self._create_slot_key(slot) for slot in available_slots}
-                # Avoid duplicates
                 filtered_new_slots = [slot for slot in new_slots
                                       if self._create_slot_key(slot) not in existing_slot_keys]
                 available_slots.extend(filtered_new_slots)
@@ -289,7 +262,6 @@ class MessageHandler:
                     'interviewer': interviewer
                 })
 
-                # Thank the interviewer
                 timezone_str = interviewer.get('timezone', 'UTC')
                 current_time = get_localized_current_time(timezone_str)
                 system_message = (
@@ -300,13 +272,11 @@ class MessageHandler:
                 self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                 self.send_message(interviewer['number'], response)
 
-                # Try scheduling for interviewees that had no slots
                 self.initiate_scheduling_for_no_slots_available(conversation_id)
-                # And also for those awaiting availability
                 self.initiate_scheduling_for_awaiting_availability(conversation_id)
 
             else:
-                # Interviewer said "no" or is providing new slots
+                # Interviewer refused or provided new slots inline
                 extracted_data = extract_slots_and_timezone(
                     message,
                     interviewer['number'],
@@ -319,7 +289,6 @@ class MessageHandler:
                         'interviewer': interviewer
                     })
 
-                    # List them out for confirmation
                     formatted_slots = []
                     for slot in extracted_data.get("time_slots", []):
                         start_time = datetime.fromisoformat(slot['start_time'])
@@ -339,7 +308,6 @@ class MessageHandler:
                     self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                     self.send_message(interviewer['number'], response)
                 else:
-                    # They said no but didn't provide new slots
                     interviewer['temp_slots'] = None
                     interviewer['state'] = ConversationState.CONVERSATION_ACTIVE.value
                     self.scheduler.mongodb_handler.update_conversation(conversation_id, {
@@ -357,7 +325,7 @@ class MessageHandler:
                     self.send_message(interviewer['number'], response)
 
         elif interviewer.get('state') == ConversationState.AWAITING_MORE_SLOTS_FROM_INTERVIEWER.value:
-            # The interviewer was asked for additional slots
+            # They were asked for additional slots
             extracted_data = extract_slots_and_timezone(
                 message,
                 interviewer['number'],
@@ -365,7 +333,6 @@ class MessageHandler:
                 interviewer.get('meeting_duration', 60)
             )
             if extracted_data and 'time_slots' in extracted_data:
-                # Merge new slots
                 available_slots = conversation.get('available_slots', [])
                 new_slots = extracted_data.get('time_slots', [])
                 existing_keys = {self._create_slot_key(slot) for slot in available_slots}
@@ -375,17 +342,18 @@ class MessageHandler:
                 ]
                 available_slots.extend(filtered_new_slots)
 
-                conversation['available_slots'] = available_slots
-                conversation['final_scheduling_round'] = True
+                # REFACTOR: Use numeric counter to track more slot requests
+                conversation['more_slots_requests'] = conversation.get('more_slots_requests', 0)
+                # We already asked once to get here, so do not increment now. We increment upon request.
+                # If you'd prefer a different approach, feel free to move the increment logic.
+
                 interviewer['state'] = ConversationState.CONVERSATION_ACTIVE.value
 
                 self.scheduler.mongodb_handler.update_conversation(conversation_id, {
                     'available_slots': available_slots,
-                    'interviewer': interviewer,
-                    'final_scheduling_round': True
+                    'interviewer': interviewer
                 })
 
-                # Reset leftover interviewees to AWAITING_AVAILABILITY
                 unscheduled = [
                     ie for ie in conversation['interviewees']
                     if ie['state'] in [ConversationState.NO_SLOTS_AVAILABLE.value,
@@ -398,17 +366,14 @@ class MessageHandler:
                     'interviewees': conversation['interviewees']
                 })
 
-                # Start scheduling with the first leftover
+                # Attempt to schedule for the leftover interviewees
                 if unscheduled:
                     self.process_scheduling_for_interviewee(conversation_id, unscheduled[0]['number'])
                 else:
-                    # If no leftover interviewees, complete the conversation
                     self.complete_conversation(conversation_id)
             else:
-                # No valid slots found in the message
                 timezone_str = interviewer.get('timezone', 'UTC')
                 current_time = get_localized_current_time(timezone_str)
-
                 system_message = (
                     f"No valid slots were detected. Please try again.\n\n"
                     f"Current Time: {current_time}"
@@ -451,7 +416,6 @@ class MessageHandler:
                 self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                 self.send_message(interviewer['number'], response)
             else:
-                # Could not parse
                 timezone_str = interviewer.get('timezone', 'UTC')
                 current_time = get_localized_current_time(timezone_str)
                 system_message = (
@@ -463,9 +427,6 @@ class MessageHandler:
                 self.send_message(interviewer['number'], response)
 
     def handle_message_from_interviewee(self, conversation_id: str, interviewee: dict, message: str):
-        """
-        Handle interviewee messages focusing on slot acceptance or denial.
-        """
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         if interviewee.get('state') == ConversationState.CONFIRMATION_PENDING.value:
             confirmation_response = self.llm_model.detect_confirmation(
@@ -483,9 +444,6 @@ class MessageHandler:
                 self._handle_slot_denial(conversation_id, interviewee, conversation)
 
     def _handle_slot_acceptance(self, conversation_id: str, interviewee: dict, conversation: dict):
-        """
-        If interviewee accepts a slot, remove it from availability.
-        """
         reserved_slots = conversation.get('reserved_slots', [])
         available_slots = conversation.get('available_slots', [])
         accepted_slot_key = self._create_slot_key(interviewee['proposed_slot'])
@@ -503,7 +461,6 @@ class MessageHandler:
         interviewee['confirmed'] = True
         interviewee['state'] = ConversationState.SCHEDULED.value
 
-        # Update the conversation
         for i, ie in enumerate(conversation['interviewees']):
             if ie['number'] == interviewee['number']:
                 conversation['interviewees'][i] = interviewee
@@ -514,16 +471,18 @@ class MessageHandler:
             'available_slots': available_slots
         })
 
-        # Finalize (create calendar event, send confirmations, etc.)
         self.scheduler.finalize_scheduling_for_interviewee(conversation_id, interviewee['number'])
 
     def _handle_slot_denial(self, conversation_id: str, interviewee: dict, conversation: dict):
-        """
-        Interviewee denies the proposed slot -> mark it 'offered' for them, free it from reserved, 
-        but do NOT remove from global availability so others can still use it.
-        """
         reserved_slots = conversation.get('reserved_slots', [])
         available_slots = conversation.get('available_slots', [])
+        slot_denials = conversation.get('slot_denials', {})
+
+        # --- FIX: Convert any stored lists back to sets ---
+        for k, val in slot_denials.items():
+            if isinstance(val, list):
+                slot_denials[k] = set(val)
+        # ---------------------------------------------------
 
         denied_slot = interviewee['proposed_slot']
         denied_slot_key = self._create_slot_key(denied_slot)
@@ -538,14 +497,52 @@ class MessageHandler:
             if self._create_slot_key(slot) != denied_slot_key
         ]
 
-        # Check if they have more untried slots left
+        # Count this denial in our in-memory set
+        if denied_slot_key not in slot_denials:
+            slot_denials[denied_slot_key] = set()
+        slot_denials[denied_slot_key].add(interviewee['number'])
+
+        # Check how many interviewees remain unscheduled
+        unscheduled_ies = [
+            ie for ie in conversation['interviewees']
+            if ie['state'] not in [ConversationState.SCHEDULED.value, ConversationState.CANCELLED.value]
+        ]
+        all_unscheduled_nums = {ie['number'] for ie in unscheduled_ies}
+
+        # If all unscheduled interviewees have denied this slot, remove it globally
+        if slot_denials[denied_slot_key].issuperset(all_unscheduled_nums):
+            before_count = len(available_slots)
+            available_slots = [
+                slot for slot in available_slots
+                if self._create_slot_key(slot) != denied_slot_key
+            ]
+            after_count = len(available_slots)
+            if after_count < before_count:
+                logger.info(
+                    f"Slot {denied_slot} removed from available_slots "
+                    f"because all unscheduled interviewees denied it."
+                )
+
+        conversation['available_slots'] = available_slots
+
+        # --- FIX: Store back as lists before saving to MongoDB ---
+        conversation['slot_denials'] = {
+            k: list(v) for k, v in slot_denials.items()
+        }
+        # ---------------------------------------------------------
+
+        for i, ie in enumerate(conversation['interviewees']):
+            if ie['number'] == interviewee['number']:
+                conversation['interviewees'][i] = interviewee
+
+        # Check if they still have untried slots
         untried_slots = self._get_untried_slots_for_interviewee(interviewee, available_slots, reserved_slots)
         if untried_slots:
             interviewee['state'] = ConversationState.AWAITING_AVAILABILITY.value
         else:
             interviewee['state'] = ConversationState.NO_SLOTS_AVAILABLE.value
+            logger.info(f"Interviewee {interviewee['name']} moved to NO_SLOTS_AVAILABLE after denying all offered slots.")
 
-        # Update conversation
         for i, ie in enumerate(conversation['interviewees']):
             if ie['number'] == interviewee['number']:
                 conversation['interviewees'][i] = interviewee
@@ -553,51 +550,46 @@ class MessageHandler:
         self.scheduler.mongodb_handler.update_conversation(conversation_id, {
             'interviewees': conversation['interviewees'],
             'reserved_slots': reserved_slots,
-            'available_slots': available_slots
+            'available_slots': conversation['available_slots'],
+            'slot_denials': conversation['slot_denials']
         })
 
-        # Either offer them the next slot or proceed to check others
-        if interviewee['state'] == ConversationState.AWAITING_AVAILABILITY.value:
-            self.process_scheduling_for_interviewee(conversation_id, interviewee['number'])
-        else:
-            self.process_remaining_interviewees(conversation_id)
+        # Continue the scheduling flow
+        self.process_remaining_interviewees(conversation_id)
+
 
     def process_remaining_interviewees(self, conversation_id: str):
         """
-        This method is called whenever an interviewee denies or finishes scheduling.
-        It ensures all interviewees who might have newly freed slots get a chance to see them 
-        before we ask the interviewer for more availability.
+        This method is called after an interviewee denies or completes scheduling, 
+        or after we add new slots. We want to keep scheduling going in parallel.
         """
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         if not conversation:
             return
 
-        # We'll loop until no changes occur (meaning we can't revert NO_SLOTS_AVAILABLE to AWAITING_AVAILABILITY anymore)
-        while True:
-            # 1) If anyone is in CONFIRMATION_PENDING, we stop. We must wait for them to respond.
-            pending = [ie for ie in conversation['interviewees']
-                       if ie['state'] == ConversationState.CONFIRMATION_PENDING.value]
-            if pending:
-                return  # Wait for the pending interviewee(s) to respond
+        # Instead of returning if we find one CONFIRMATION_PENDING, we skip it 
+        # and let others proceed in parallel.
 
-            # 2) If there's someone in AWAITING_AVAILABILITY, schedule them.
+        # 1) For interviewees in AWAITING_AVAILABILITY, we try to schedule them.
+        changed_something = True
+        while changed_something:
+            changed_something = False
+            conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
+            if not conversation:
+                return
+
+            # Offer next slot to every interviewee in AWAITING_AVAILABILITY
             awaiting = [ie for ie in conversation['interviewees']
                         if ie['state'] == ConversationState.AWAITING_AVAILABILITY.value]
-            if awaiting:
-                # Process the first one; we do one at a time
-                self.process_scheduling_for_interviewee(conversation_id, awaiting[0]['number'])
-                # Re-fetch conversation in case changes happen
-                conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
-                continue  # Loop again to see if there's more
+            for interviewee in awaiting:
+                self.process_scheduling_for_interviewee(conversation_id, interviewee['number'])
+                changed_something = True
 
-            # 3) For each NO_SLOTS_AVAILABLE, see if a newly-freed slot is actually now available
-            # If so, revert them to AWAITING_AVAILABILITY
+            # 2) For those in NO_SLOTS_AVAILABLE, see if a newly freed slot might now be available
             no_slots = [ie for ie in conversation['interviewees']
                         if ie['state'] == ConversationState.NO_SLOTS_AVAILABLE.value]
             if not no_slots:
-                # If none are NO_SLOTS_AVAILABLE, we break out to final checks
-                break
-
+                continue
             available_slots = conversation.get('available_slots', [])
             reserved_slots = conversation.get('reserved_slots', [])
             updated_any = False
@@ -609,41 +601,41 @@ class MessageHandler:
                     updated_any = True
 
             if updated_any:
-                # Update the conversation for these changes
                 self.scheduler.mongodb_handler.update_conversation(
-                    conversation['conversation_id'],
-                    {'interviewees': conversation['interviewees']}
+                    conversation_id, {'interviewees': conversation['interviewees']}
                 )
-                # Then continue the loop, so we can process newly AWAITING_AVAILABILITY interviewees
-                conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
-                continue
-            else:
-                # If we didn't update anyone, break out
-                break
+                changed_something = True
 
-        # If we are here, there's no one in AWAITING_AVAILABILITY or CONFIRMATION_PENDING
-        # Some might remain NO_SLOTS_AVAILABLE or be CANCELLED or SCHEDULED
+        # After we tried reassigning states, let's see if anyone is left unscheduled
+        conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         unscheduled = [
             ie for ie in conversation['interviewees']
             if ie['state'] not in [ConversationState.SCHEDULED.value, ConversationState.CANCELLED.value]
         ]
 
+        # If at least one is CONFIRMATION_PENDING, we do nothing; we wait for them.
+        pending = [ie for ie in unscheduled if ie['state'] == ConversationState.CONFIRMATION_PENDING.value]
+        if pending:
+            logger.info("Some interviewees are in CONFIRMATION_PENDING; scheduling for others has continued in parallel.")
+            return
+
+        # Anyone else is either NO_SLOTS_AVAILABLE or some other unscheduled state 
+        # if we can't proceed, we ask for more slots or finalize
         if unscheduled:
-            # We have interviewees who still can't be scheduled
-            if conversation.get('final_scheduling_round'):
-                # If we've already asked interviewer for more slots once, let's finalize
+            # Check how many times we've asked for more slots
+            requests_count = conversation.get('more_slots_requests', 0)
+            if requests_count >= 2:
+                # If we already asked 2+ times, finalize
+                logger.info("Reached maximum number of requests for more slots. Finalizing conversation.")
                 self.complete_conversation(conversation_id)
             else:
-                # Ask interviewer for more slots
+                # Request more slots
                 self._request_more_slots(conversation_id, unscheduled, conversation)
         else:
-            # Everyone is scheduled or cancelled
+            # All scheduled or cancelled -> complete
             self.complete_conversation(conversation_id)
 
     def process_scheduling_for_interviewee(self, conversation_id: str, interviewee_number: str):
-        """
-        Offer the next untried slot to a specific interviewee.
-        """
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         if not conversation:
             logger.error(f"Conversation {conversation_id} not found.")
@@ -655,7 +647,6 @@ class MessageHandler:
             logger.error(f"Interviewee {interviewee_number} not found in conversation {conversation_id}.")
             return
 
-        # If already pending, wait
         if interviewee['state'] == ConversationState.CONFIRMATION_PENDING.value:
             return
 
@@ -664,7 +655,6 @@ class MessageHandler:
 
         untried = self._get_untried_slots_for_interviewee(interviewee, available_slots, reserved_slots)
         if untried:
-            # Offer the first untried slot
             next_slot = untried[0]
             interviewee['proposed_slot'] = next_slot
             interviewee['state'] = ConversationState.CONFIRMATION_PENDING.value
@@ -680,17 +670,14 @@ class MessageHandler:
                 'reserved_slots': reserved_slots
             })
 
-            # Send that slot to the interviewee
             timezone_str = interviewee.get('timezone', 'UTC')
             localized_start_time = datetime.fromisoformat(next_slot['start_time']).astimezone(
                 pytz.timezone(timezone_str)
             ).strftime('%A, %B %d, %Y at %I:%M %p %Z')
 
             system_message = (
-                f"Hi {interviewee['name']}! 👋 We've found a potential time for your interview with "
-                f"Acme Corp: {localized_start_time}. Does this time work for you? 👍 Let me know! "
-                f"If it doesn't, we can explore other options. If we have trouble finding a suitable time, "
-                f"I'll contact Alice Williams at Acme Corp for help. 😊"
+                f"Hi {interviewee['name']}! We've found a potential time for your interview: {localized_start_time}. "
+                f"Does this time work for you?"
             )
             response = self.generate_response(
                 interviewee,
@@ -711,14 +698,10 @@ class MessageHandler:
                 'interviewees': conversation['interviewees']
             })
 
-            # Move on to see if we can help others or if we must request more slots
+            logger.info(f"Interviewee {interviewee['name']} has no more untried slots; marking NO_SLOTS_AVAILABLE.")
             self.process_remaining_interviewees(conversation_id)
 
     def _get_untried_slots_for_interviewee(self, interviewee: dict, available_slots: list, reserved_slots: list) -> list:
-        """
-        Return all globally available slots that haven't been offered to this interviewee yet
-        and are not currently reserved by them.
-        """
         offered_keys = {self._create_slot_key(slot) for slot in interviewee.get('offered_slots', [])}
         reserved_keys = {self._create_slot_key(slot) for slot in reserved_slots}
         return [
@@ -728,16 +711,21 @@ class MessageHandler:
         ]
 
     def _request_more_slots(self, conversation_id: str, unscheduled: list, conversation: dict):
-        """
-        Ask the interviewer for more availability after we've used all currently known slots.
-        """
         interviewer = conversation.get('interviewer')
         if not interviewer:
             return
 
         interviewer['state'] = ConversationState.AWAITING_MORE_SLOTS_FROM_INTERVIEWER.value
+
+        # REFACTOR: increment the number of times we've asked for more slots
+        conversation['more_slots_requests'] = conversation.get('more_slots_requests', 0) + 1
+        # REFACTOR: store the timestamp
+        conversation['last_more_slots_request_time'] = datetime.now(pytz.UTC).isoformat()
+
         self.scheduler.mongodb_handler.update_conversation(conversation_id, {
-            'interviewer': interviewer
+            'interviewer': interviewer,
+            'more_slots_requests': conversation['more_slots_requests'],
+            'last_more_slots_request_time': conversation['last_more_slots_request_time']
         })
 
         timezone_str = interviewer.get('timezone', 'UTC')
@@ -761,7 +749,8 @@ class MessageHandler:
 
     def complete_conversation(self, conversation_id: str):
         """
-        Mark the conversation as completed and notify the interviewer. 
+        Mark conversation as completed & notify the interviewer. 
+        This is a simplified version that defers final conversation closure to the InterviewScheduler's method.
         """
         try:
             conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
@@ -772,7 +761,8 @@ class MessageHandler:
             unscheduled = [
                 ie['name'] for ie in conversation['interviewees']
                 if ie['state'] in [ConversationState.NO_SLOTS_AVAILABLE.value,
-                                   ConversationState.AWAITING_AVAILABILITY.value]
+                                   ConversationState.AWAITING_AVAILABILITY.value,
+                                   ConversationState.CONFIRMATION_PENDING.value]
             ]
 
             conversation['status'] = 'completed'
@@ -803,14 +793,14 @@ class MessageHandler:
             self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
             self.send_message(interviewer['number'], response)
 
+            # Let the central scheduler finalize
+            self.scheduler.complete_conversation(conversation_id)
+
         except Exception as e:
             logger.error(f"Error completing conversation {conversation_id}: {str(e)}")
             logger.error(traceback.format_exc())
 
     def send_reminder(self, conversation_id: str, participant_id: str):
-        """
-        Send a reminder to the participant if they haven't replied in a while.
-        """
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         if not conversation:
             logger.error(f"Conversation {conversation_id} not found for sending reminder.")
@@ -843,9 +833,6 @@ class MessageHandler:
         self.send_message(participant['number'], response)
 
     def update_participant_timezone(self, conversation_id: str, participant: dict, timezone: str) -> None:
-        """
-        Update participant's timezone and prompt them for availability.
-        """
         try:
             conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
             if not conversation:
@@ -867,7 +854,6 @@ class MessageHandler:
                     'interviewees': conversation['interviewees']
                 })
 
-            # Notify them
             current_time = get_localized_current_time(timezone)
             system_message = (
                 f"Thanks! I've set your timezone to {timezone}. "
@@ -889,9 +875,6 @@ class MessageHandler:
             logger.error(traceback.format_exc())
 
     def initiate_conversation_with_interviewee(self, conversation_id: str, interviewee_number: str):
-        """
-        If an interviewee doesn't have a timezone set, prompt them. Otherwise, process scheduling.
-        """
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         if not conversation:
             logger.error(f"Conversation {conversation_id} not found.")
@@ -916,7 +899,6 @@ class MessageHandler:
             })
             self.process_scheduling_for_interviewee(conversation_id, interviewee_number)
         else:
-            # Ask for timezone
             interviewee['state'] = ConversationState.TIMEZONE_CLARIFICATION.value
             for i, ie in enumerate(conversation['interviewees']):
                 if ie['number'] == interviewee_number:
@@ -943,9 +925,6 @@ class MessageHandler:
             self.send_message(interviewee['number'], response)
 
     def initiate_scheduling_for_no_slots_available(self, conversation_id: str):
-        """
-        Re-attempt scheduling for those previously NO_SLOTS_AVAILABLE after new slots are added.
-        """
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         if not conversation:
             logger.error(f"Conversation {conversation_id} not found.")
@@ -963,9 +942,6 @@ class MessageHandler:
             self.process_scheduling_for_interviewee(conversation_id, ie['number'])
 
     def initiate_scheduling_for_awaiting_availability(self, conversation_id: str):
-        """
-        Start scheduling for interviewees who are AWAITING_AVAILABILITY.
-        """
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         if not conversation:
             logger.error(f"Conversation {conversation_id} not found.")
@@ -983,9 +959,6 @@ class MessageHandler:
             self.initiate_conversation_with_interviewee(conversation_id, interviewee['number'])
 
     def handle_query(self, conversation_id: str, participant: dict, message: str):
-        """
-        Handle general queries (both interviewer and interviewee).
-        """
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         other_participant = None
         if participant.get('role') != 'interviewer':
@@ -1006,9 +979,6 @@ class MessageHandler:
         self.send_message(participant['number'], response)
 
     def handle_cancellation_request_interviewer(self, conversation_id: str, interviewer: dict, message: str):
-        """
-        Handle an interview cancellation request from the interviewer.
-        """
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         state = interviewer.get('state')
 
@@ -1074,12 +1044,10 @@ class MessageHandler:
                 'interviewer': interviewer
             })
 
-            # Possibly complete if no scheduling remains
             if self.scheduler.is_conversation_complete(conversation):
                 self.complete_conversation(conversation_id)
 
         else:
-            # Prompt interviewer for which interviewee to cancel
             timezone_str = interviewer.get('timezone', 'UTC')
             current_time = get_localized_current_time(timezone_str)
 
@@ -1094,9 +1062,6 @@ class MessageHandler:
             self.send_message(interviewer['number'], response)
 
     def handle_cancellation_request_interviewee(self, conversation_id: str, interviewee: dict, message: str):
-        """
-        Handle an interview cancellation request from an interviewee.
-        """
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         interviewer = conversation.get('interviewer')
 
@@ -1166,7 +1131,6 @@ class MessageHandler:
                 self.scheduler.log_conversation(conversation_id, interviewee['number'], "system", response, "AI")
                 self.send_message(interviewee['number'], response)
         else:
-            # Prompt for the name
             timezone_str = interviewee.get('timezone', 'UTC')
             current_time = get_localized_current_time(timezone_str)
 
@@ -1184,9 +1148,6 @@ class MessageHandler:
             self.send_message(interviewee['number'], response)
 
     def handle_reschedule_request_interviewer(self, conversation_id: str, interviewer: dict, message: str):
-        """
-        The interviewer wants to reschedule a meeting that's already on the calendar.
-        """
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         scheduled = [ie for ie in conversation['interviewees'] if ie.get('event_id')]
         if not scheduled:
@@ -1243,7 +1204,6 @@ class MessageHandler:
                 self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                 self.send_message(interviewer['number'], response)
         else:
-            # Multiple scheduled interviews found, ask for which to reschedule
             timezone_str = interviewer.get('timezone', 'UTC')
             current_time = get_localized_current_time(timezone_str)
 
@@ -1261,9 +1221,6 @@ class MessageHandler:
             self.send_message(interviewer['number'], response)
 
     def handle_reschedule_request_interviewee(self, conversation_id: str, interviewee: dict, message: str):
-        """
-        The interviewee wants to reschedule a meeting that's already on the calendar.
-        """
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         event_id = interviewee.get('event_id')
         if event_id:
@@ -1304,9 +1261,6 @@ class MessageHandler:
             self.complete_conversation(conversation_id)
 
     def _create_slot_key(self, slot):
-        """
-        Create a unique, hashable key from a slot dictionary based on 'start_time'.
-        """
         if not slot:
             logger.error("Invalid slot: slot is None or empty")
             return None
