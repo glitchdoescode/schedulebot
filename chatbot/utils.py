@@ -61,69 +61,6 @@ def extract_slots_and_timezone(message, phone_number, participant_history, meeti
     }}
     ```"""
     json2 = """
-    ```json
-    {{
-      "time_slots": [
-        {{
-          "start_time": "2024-11-01T15:00:00",
-          "end_time": "2024-11-01T16:00:00"
-        }},
-        {{
-          "start_time": "2024-11-01T16:00:00",
-          "end_time": "2024-11-01T17:00:00"
-        }},
-        {{
-          "start_time": "2024-11-02T10:00:00",
-          "end_time": "unspecified"
-        }}
-      ],
-      "timezone": "America/New_York"
-    }}
-    ```"""
-    json3 = """```json
-    {{
-      "time_slots": [
-        {{
-          "start_time": "2024-11-06T09:00:00",
-          "end_time": "2024-11-06T10:00:00"
-        }},
-        {{
-          "start_time": "2024-11-06T10:30:00",
-          "end_time": "2024-11-06T11:30:00"
-        }},
-        {{
-          "start_time": "2024-11-07T16:00:00",
-          "end_time": "unspecified"
-        }}
-      ],
-      "timezone": "Europe/London"
-    }}
-    ```"""
-
-    json4="""
-{{
-  "time_slots": [
-    {{
-      "start_time": "2024-11-01T10:00:00",
-      "end_time": "2024-11-01T11:00:00"
-    }},
-    {{
-      "start_time": "2024-11-01T11:30:00",
-      "end_time": "2024-11-01T12:30:00"
-    }},
-    {{
-      "start_time": "2024-11-01T12:30:00",
-      "end_time": "2024-11-01T13:30:00"
-    }},
-    {{
-      "start_time": "2024-11-01T14:00:00",
-      "end_time": "2024-11-01T15:00:00"
-    }}
-  ],
-  "timezone": "unspecified"
-}}
-"""
-    json5 = """
     {{}}
     """
 
@@ -137,7 +74,7 @@ Act as an expert natural language processor specializing in date and time extrac
 1. **Extract Time Slots and Timezone**:
    - Extract time slots and timezone information from the participant's message. Use context from the conversation history to clarify ambiguous timing references or timezone indications. **Support all input languages** for parsing.
    - Ensure that the extracted timezone is a valid IANA time zone name (e.g., "America/New_York", "Europe/London", "Asia/Kolkata"). If the timezone provided does not match any IANA time zone, set it to "unspecified".
-   - If the message contains vague timing references such as "second half of the day," "after midnight," or similar expressions without specific times, return an empty JSON data structure: {json5}.
+   - If the message contains vague timing references such as "second half of the day," "after midnight," or similar expressions without specific times, return an empty JSON data structure: {json2}.
 
 2. **Handle Confirmations**:
    - Detect if the user message indicates confirmation (e.g., "yes," "yeah that works," "that works for me") and check the conversation history to identify what the confirmation refers to.
@@ -158,14 +95,14 @@ Act as an expert natural language processor specializing in date and time extrac
    - Provide all extracted time slots, inferred timezones, and confirmed times (if applicable) in a well-structured JSON format. Ensure the output is in English and can be easily parsed with the `json` Python library.
    - For vague timing references, return the following JSON structure:
      ```json
-     {json5}
+     {json2}
      ```
 
 ## Specifics
 
 - Detect and extract all possible time slots mentioned by the participant, considering broader conversation context as needed.
 - Recognize various time expressions (e.g., "tomorrow at 3 PM," "next Monday from 2-4 PM," or "anytime after 6 PM") in any input language.
-- Ensure that vague expressions like "second half of the day" or "after midnight" result in an empty JSON data structure (`{json5}`).
+- Ensure that vague expressions like "second half of the day" or "after midnight" result in an empty JSON data structure (`{json2}`).
 - Convert all extracted times to a standard timestamp format (ISO 8601).
 - Handle cases where only a start time is provided by setting `end_time` to "unspecified."
 - If there are multiple slots in a range, split the time range into distinct slots, ensuring no overlap, and respecting the provided meeting duration.
@@ -179,46 +116,6 @@ Act as an expert natural language processor specializing in date and time extrac
 - `time_slots`: A list of objects with `start_time` and `end_time` for each slot.
 - `timezone`: A string indicating the inferred timezone or "unspecified" if not provided.
 - `confirmed_time`: The confirmed time slot, if applicable, structured as an object with `start_time` and `end_time`. If no confirmation is detected, this field is absent.
-
-## Examples
-
-**Example 1:** Confirmation for a suggested time slot
-
-**Input Message:** "Yes, that works for me."
-
-**Participant History:** "Could you do Friday from 3 PM to 5 PM?"
-
-**Output JSON:** 
-```json
-{json2}
-```
-**Example 2:** Explicit time slot and timezone extraction without confirmation
-
-**Input Message:** "On se parle mercredi prochain de 9h à 11h, et peut-être jeudi à 16h. Mon contact est +44-7911-123456."
-
-**Participant History:** "Je suis basé à Londres."
-
-**Output JSON:** 
-```json
-{json3}
-```
-**Example 3:** Extracting multiple slots with gaps and durations
-
-**Input Message:** "I am available from 10 AM to 10 PM on Friday with gaps of 30 minutes between each interviewee."
-
-**Meeting Duration:** 60 minutes
-
-**Output JSON:**
-
-```json
-  {json4}
-```
-Example 4: Vague timing references Input Message: "I am free tomorrow in the second half of the day." Output JSON: {json5}
-
-Input Message: "I am free after midnight." Output JSON: 
-```json
-{json5}
-```
 
 Notes
 Confirmation Handling:

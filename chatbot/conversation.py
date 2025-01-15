@@ -1,3 +1,4 @@
+# chatbot/conversation.py
 from datetime import datetime, timedelta
 import pytz
 import logging
@@ -72,7 +73,6 @@ class AttentionFlagHandler:
             all_flags.update(fset)
 
         if all_flags:
-            # Store flags in the database
             self.store_attention_flags(conversation_id, all_flags)
 
     def store_attention_flags(self, conversation_id: str, flags: set):
@@ -387,21 +387,20 @@ class InterviewScheduler:
             ]
             candidates_info = "Here are the candidates assigned:\n" + "\n".join(candidates_info_list)
 
+        # Localized current time for interviewer
         timezone_str = interviewer.get('timezone', 'UTC')
         current_time = get_localized_current_time(timezone_str)
 
-        system_message = f"""Say Hello to {interviewer['name']}, and tell him that you are here to assist with scheduling interviews for the upcoming candidates. Also ask them to provide their availability.
-
-Tell them to feel free to share any specific time preferences or constraints and once you have their availability, you’ll coordinate with the candidates.
-
-Current Time: {current_time}
-
-##Details about the interview - 
-Candidates_Info -
-
-{candidates_info}
-Duration - {interviewer['meeting_duration']} minutes
-"""
+        # --- Third-person perspective system message ---
+        system_message = (
+            f"Instruct the AI assistant to greet {interviewer['name']} and include the JD Title of candidates. "
+            f"Then inform them the assistant is ready to assist with scheduling. "
+            f"Advise the assistant to request {interviewer['name']}'s availability. "
+            f"\n\nCurrent Local Time: {current_time}\n\n"
+            f"Details about the interviews:\n"
+            f"Candidates:\n{candidates_info}\n"
+            f"Duration: {interviewer['meeting_duration']} minutes."
+        )
 
         response = self.message_handler.generate_response(
             interviewer,
@@ -435,7 +434,7 @@ Duration - {interviewer['meeting_duration']} minutes
                 interviewee['scheduled_slot'] = interviewee['proposed_slot']
                 interviewee['state'] = ConversationState.SCHEDULED.value
 
-                # Remove the scheduled slot from available_slots
+                # Remove the scheduled slot from available_slots if it exists
                 if interviewee['proposed_slot'] in conversation['available_slots']:
                     conversation['available_slots'].remove(interviewee['proposed_slot'])
                     self.mongodb_handler.update_conversation(conversation_id, {
@@ -446,7 +445,7 @@ Duration - {interviewer['meeting_duration']} minutes
                     'interviewees': conversation['interviewees']
                 })
 
-                ### ADDED: Only send confirmation to the interviewee, not the interviewer
+                # Only notify the interviewee that the slot is now scheduled
                 participant = interviewee
                 try:
                     participant_timezone = participant.get('timezone', 'UTC')
@@ -457,9 +456,14 @@ Duration - {interviewer['meeting_duration']} minutes
                         tz = pytz.UTC
 
                     localized_meeting_time = meeting_time_utc.astimezone(tz)
+                    # Localized current time for the interviewee
+                    local_now = get_localized_current_time(participant_timezone)
+
+                    # --- Third-person perspective system message ---
                     system_message = (
-                        f"Your meeting has been scheduled for "
-                        f"{localized_meeting_time.strftime('%A, %B %d, %Y at %I:%M %p %Z')}."
+                        f"Instruct the AI assistant to inform {participant['name']} that their meeting "
+                        f"has been scheduled for {localized_meeting_time.strftime('%A, %B %d, %Y at %I:%M %p %Z')}.\n\n"
+                        f"Current Local Time: {local_now}"
                     )
 
                     response = self.message_handler.generate_response(
@@ -475,6 +479,7 @@ Duration - {interviewer['meeting_duration']} minutes
                 except Exception as e:
                     logger.error(f"Error sending confirmation to participant {participant['number']}: {str(e)}")
 
+                # Reset
                 interviewee['confirmed'] = False
                 interviewee['proposed_slot'] = None
                 self.mongodb_handler.update_conversation(conversation_id, {
@@ -489,7 +494,7 @@ Duration - {interviewer['meeting_duration']} minutes
                     'scheduled_slots': conversation['scheduled_slots']
                 })
 
-                # Create Google Calendar Event
+                # Attempt to create Google Calendar Event
                 event_result = self.api_handler.post_to_create_event(conversation_id, interviewee_number)
                 logger.info(f"event_result: {event_result}")
                 if event_result:
@@ -582,7 +587,7 @@ Duration - {interviewer['meeting_duration']} minutes
         timezone_str = interviewer.get('timezone', 'UTC')
         current_time = get_localized_current_time(timezone_str)
 
-        ### ADDED: Build conclusive report
+        # Build conclusive report
         report_lines = []
         for ie in conversation['interviewees']:
             name = ie['name']
@@ -605,13 +610,17 @@ Duration - {interviewer['meeting_duration']} minutes
         self.message_handler.send_message(interviewer_number, final_report)
         self.log_conversation(conversation_id, 'interviewer', "system", final_report, "AI")
 
-        # Now mark conversation as completed
+        # Mark conversation as completed
         self.mongodb_handler.update_conversation(
             conversation_id,
             {'status': 'completed', 'completed_at': datetime.now().isoformat()}
         )
 
-        system_message = f"The conversation has been marked as completed.\n\nCurrent Time: {current_time}"
+        # --- Third-person perspective system message ---
+        system_message = (
+            f"Instruct the AI assistant to inform {interviewer['name']} that this scheduling conversation "
+            f"is now completed.\n\nCurrent Local Time: {current_time}"
+        )
         response = self.message_handler.generate_response(
             interviewer,
             None,
@@ -648,14 +657,14 @@ Duration - {interviewer['meeting_duration']} minutes
             if timezone and timezone.lower() != 'unspecified':
                 return timezone
 
-            # Ask for city
+            # Ask for city (in a third-person perspective)
+            # Local time fallback is UTC
             current_time = get_localized_current_time('UTC')
             name = participant['name']
             role = participant['role']
             system_message = (
-                f"Hello {name}! Before we proceed with scheduling, could you please let me know which city you're in? "
-                f"This helps me provide accurate scheduling options.\n\n"
-                f"Current Time: {current_time}"
+                f"Instruct the AI assistant to ask {name} for their city/timezone before proceeding with scheduling.\n\n"
+                f"Current Local Time (fallback UTC): {current_time}"
             )
             response = self.message_handler.generate_response(
                 participant,

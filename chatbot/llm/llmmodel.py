@@ -555,48 +555,46 @@ Answer the participant's question in a professional and concise manner.
 
     def detect_confirmation(self, participant_name, participant_role, meeting_duration, conversation_history, conversation_state, user_message):
         
-        json="""
+        json = """
             {{
                 "confirmed": true/false,
                 "reason": "Optional explanation if not confirmed or unclear"
             }}
             """
-        
+
         PROMPT_TEMPLATE = f"""
-Using the input variables, determine whether the participant has confirmed or declined the proposed meeting time based on their latest message and conversation history.
+        Using the input variables, determine whether the participant has confirmed or declined a given proposal, request, or statement based on their latest message and conversation history.
 
-**Multilingual Handling**:
-- While analyzing the conversation history and user message, consider the language of the messages to ensure contextual understanding.
-- **Output the confirmation status in English** in the specified format, regardless of the input language.
+        **Multilingual Handling**:
+        - While analyzing the conversation history and user message, consider the language of the messages to ensure contextual understanding.
+        - **Output the confirmation status in English** in the specified format, regardless of the input language.
 
-**Input Variables:**
+        **Input Variables:**
 
-- **Participant Name**: {participant_name}
-- **Participant Role**: {participant_role}
-- **Meeting Duration**: {meeting_duration}
-- **Conversation History**: {conversation_history} (all previous messages exchanged with the participant)
-- **Conversation State**: {conversation_state} (current stage in the scheduling process)
-- **User Message**: {user_message} (latest message from the participant)
+        - **Participant Name**: {participant_name}
+        - **Participant Role**: {participant_role}
+        - **Conversation History**: {conversation_history} (all previous messages exchanged with the participant)
+        - **Conversation State**: {conversation_state} (current stage in the process)
+        - **User Message**: {user_message} (latest message from the participant)
 
-### Task
+        ### Task
 
-1. **Analyze**: Review the conversation history and user message to understand if the participant has confirmed or declined the proposed meeting time.
+        1. **Analyze**: Review the conversation history and user message to determine whether the participant has confirmed, declined, or left the response ambiguous regarding the subject of discussion.
 
-2. **Determine Confirmation**:
-   - If the participant has **explicitly confirmed** the proposed time (e.g., "Yes, that works for me", "I confirm the meeting", "Sounds good"), mark as **confirmed**.
-   - If the participant has **declined** the proposed time (e.g., "I can't make it at that time", "No, that doesn't work"), mark as **not confirmed**.
-   - If the response is **ambiguous** or does not provide a clear confirmation or declination, mark as **unclear**.
+        2. **Determine Confirmation**:
+        - If the participant has **explicitly confirmed** (e.g., "Yes", "Okay", "Sounds good", "I agree", "That works for me"), mark as **confirmed**.
+        - If the participant has **declined** (e.g., "No", "I can't", "That doesn't work", "I disagree"), mark as **not confirmed**.
+        - If the response is **ambiguous**, unclear, or lacks sufficient context to determine confirmation (e.g., "Let me check", "I'm not sure"), mark as **unclear**.
 
-3. **Output Format**:
-   - Output only the confirmation status in JSON format:
+        3. **Output Format**:
+        - Output only the confirmation status in JSON format:
 
-   ```json
-
-   {json}
-
-   ```
-
-"""
+        ```json
+        {json}
+        Notes:
+        This task applies to general confirmations and not just time-based confirmations.
+        Take into account the conversation's current state to infer context.
+        Include a reason in the JSON output only if the status is not confirmed or unclear. """
         
         llm_model = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash",

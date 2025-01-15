@@ -1,3 +1,5 @@
+# chatbot/message_handler.py
+
 import logging
 import random
 import time
@@ -135,13 +137,29 @@ class MessageHandler:
         except Exception as e:
             logger.error(f"Error generating response: {str(e)}")
             logger.error(traceback.format_exc())
-            return "I'm sorry, something went wrong while processing your request."
+            return "The AI assistant encountered an error while processing the request."
 
     def receive_message(self, from_number: str, message: str):
+        """
+        Main entry point for handling an incoming message from a participant. 
+
+        The refactor below adds a check to stop processing if the conversation 
+        is already completed, avoiding repeated messages once scheduling is done.
+        """
         conversation_id, participant, interviewer_number = self.find_conversation_and_participant(from_number, message)
         if not conversation_id or not participant:
             logger.warning(f"No active conversation found for number: {from_number}")
             return
+
+        # --- NEW: Check if the conversation is already completed ---
+        conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
+        if not conversation:
+            logger.warning(f"Conversation {conversation_id} not found or previously removed.")
+            return
+        if conversation.get('status') == 'completed':
+            logger.info(f"Conversation {conversation_id} is already completed; ignoring further messages.")
+            return
+        # --- END NEW CHECK ---
 
         now_utc = datetime.now(pytz.UTC)
         self.scheduler.mongodb_handler.update_conversation(
@@ -152,6 +170,7 @@ class MessageHandler:
         self.scheduler.log_conversation_history(conversation_id)
         self.scheduler.log_conversation(conversation_id, participant['number'], "user", message, "Participant")
 
+        # Re-fetch conversation if needed (already in memory, but to keep consistent)
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
 
         intent = self.llm_model.detect_intent(
@@ -163,7 +182,6 @@ class MessageHandler:
             conversation_state=participant.get('state', ''),
             user_message=message
         )
-
         logger.info(f"Detected intent: {intent}")
 
         if "CANCELLATION_REQUESTED" in intent:
@@ -222,6 +240,7 @@ class MessageHandler:
     def handle_message_from_interviewer(self, conversation_id: str, interviewer: dict, message: str):
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
 
+        # If the interviewer is in AWAITING_SLOT_CONFIRMATION, they had just provided some slots
         if interviewer.get('state') == ConversationState.AWAITING_SLOT_CONFIRMATION.value:
             confirmation_response = self.llm_model.detect_confirmation(
                 participant_name=interviewer['name'],
@@ -235,11 +254,14 @@ class MessageHandler:
             if confirmation_response.get('confirmed'):
                 temp_slots = interviewer.get('temp_slots')
                 if not temp_slots:
-                    timezone_str = interviewer.get('timezone', 'UTC')
-                    current_time = get_localized_current_time(timezone_str)
+                    # Local time for interviewer
+                    tz_str = interviewer.get('timezone', 'UTC')
+                    local_now = get_localized_current_time(tz_str)
+
                     system_message = (
-                        f"Error with the time slots. Please provide availability again.\n\n"
-                        f"Current Time: {current_time}"
+                        "Instruct the AI assistant to inform the interviewer that there was an error "
+                        "with the previously identified time slots and to please provide them again.\n\n"
+                        f"Current Local Time: {local_now}"
                     )
                     response = self.generate_response(interviewer, None, message, system_message)
                     self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
@@ -249,8 +271,10 @@ class MessageHandler:
                 available_slots = conversation.get('available_slots', [])
                 new_slots = temp_slots.get('time_slots', [])
                 existing_slot_keys = {self._create_slot_key(slot) for slot in available_slots}
-                filtered_new_slots = [slot for slot in new_slots
-                                      if self._create_slot_key(slot) not in existing_slot_keys]
+                filtered_new_slots = [
+                    slot for slot in new_slots
+                    if self._create_slot_key(slot) not in existing_slot_keys
+                ]
                 available_slots.extend(filtered_new_slots)
 
                 conversation['available_slots'] = available_slots
@@ -262,28 +286,36 @@ class MessageHandler:
                     'interviewer': interviewer
                 })
 
-                timezone_str = interviewer.get('timezone', 'UTC')
-                current_time = get_localized_current_time(timezone_str)
+                # Local time for interviewer
+                tz_str = interviewer.get('timezone', 'UTC')
+                local_now = get_localized_current_time(tz_str)
+
                 system_message = (
-                    f"Thank you! We'll proceed with scheduling the interviews using these slots.\n\n"
-                    f"Current Time: {current_time}"
+                    "Instruct the AI assistant to confirm to the interviewer that their slots have been received and "
+                    "the assistant will proceed with scheduling the interviews using these new slots.\n\n"
+                    f"Current Local Time: {local_now}"
                 )
                 response = self.generate_response(interviewer, None, message, system_message)
                 self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                 self.send_message(interviewer['number'], response)
 
+                # Now attempt scheduling for any interviewees who had no slots or were awaiting
                 self.initiate_scheduling_for_no_slots_available(conversation_id)
                 self.initiate_scheduling_for_awaiting_availability(conversation_id)
 
             else:
-                # Interviewer refused or provided new slots inline
+                # Interviewer refused or typed "no" or typed something else (maybe new slots inline)
                 extracted_data = extract_slots_and_timezone(
                     message,
                     interviewer['number'],
                     interviewer.get('conversation_history', []),
                     interviewer.get('meeting_duration', 60)
                 )
+                tz_str = interviewer.get('timezone', 'UTC')
+                local_now = get_localized_current_time(tz_str)
+
                 if extracted_data and 'time_slots' in extracted_data:
+                    # Found new slots in the message
                     interviewer['temp_slots'] = extracted_data
                     self.scheduler.mongodb_handler.update_conversation(conversation_id, {
                         'interviewer': interviewer
@@ -293,32 +325,30 @@ class MessageHandler:
                     for slot in extracted_data.get("time_slots", []):
                         start_time = datetime.fromisoformat(slot['start_time'])
                         tz = extracted_data.get('timezone', 'UTC')
-                        formatted_slots.append(
-                            f"- {start_time.astimezone(pytz.timezone(tz)).strftime('%A, %B %d, %Y at %I:%M %p %Z')}"
-                        )
+                        slot_str = start_time.astimezone(pytz.timezone(tz)).strftime('%A, %B %d, %Y at %I:%M %p %Z')
+                        formatted_slots.append(f"- {slot_str}")
                     slots_text = "\n".join(formatted_slots)
-                    current_time = get_localized_current_time(tz)
 
                     system_message = (
-                        f"New time slots identified:\n\n{slots_text}\n\n"
-                        f"Reply 'yes' to confirm or 'no' to provide different slots.\n\n"
-                        f"Current Time: {current_time}"
+                        "Instruct the AI assistant to inform the interviewer that the following new slots "
+                        f"have been parsed:\n\n{slots_text}\n\n"
+                        "Ask the interviewer to reply with 'yes' to confirm these slots or 'no' to change them.\n\n"
+                        f"Current Local Time: {local_now}"
                     )
                     response = self.generate_response(interviewer, None, message, system_message)
                     self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                     self.send_message(interviewer['number'], response)
                 else:
+                    # No valid new slots recognized
                     interviewer['temp_slots'] = None
                     interviewer['state'] = ConversationState.CONVERSATION_ACTIVE.value
                     self.scheduler.mongodb_handler.update_conversation(conversation_id, {
                         'interviewer': interviewer
                     })
 
-                    timezone_str = interviewer.get('timezone', 'UTC')
-                    current_time = get_localized_current_time(timezone_str)
                     system_message = (
-                        f"Please share your availability again in a clear format.\n\n"
-                        f"Current Time: {current_time}"
+                        "Instruct the AI assistant to request the interviewer to share availability again in a clear format.\n\n"
+                        f"Current Local Time: {local_now}"
                     )
                     response = self.generate_response(interviewer, None, message, system_message)
                     self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
@@ -332,6 +362,9 @@ class MessageHandler:
                 interviewer.get('conversation_history', []),
                 interviewer.get('meeting_duration', 60)
             )
+            tz_str = interviewer.get('timezone', 'UTC')
+            local_now = get_localized_current_time(tz_str)
+
             if extracted_data and 'time_slots' in extracted_data:
                 available_slots = conversation.get('available_slots', [])
                 new_slots = extracted_data.get('time_slots', [])
@@ -350,6 +383,16 @@ class MessageHandler:
                     'interviewer': interviewer
                 })
 
+                system_message = (
+                    "Instruct the AI assistant to confirm to the interviewer that the new slots have been received. "
+                    "Then the assistant should attempt to schedule any remaining interviewees.\n\n"
+                    f"Current Local Time: {local_now}"
+                )
+                response = self.generate_response(interviewer, None, message, system_message)
+                self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
+                self.send_message(interviewer['number'], response)
+
+                # Make any unscheduled interviewees AWAITING_AVAILABILITY
                 unscheduled = [
                     ie for ie in conversation['interviewees']
                     if ie['state'] in [ConversationState.NO_SLOTS_AVAILABLE.value,
@@ -365,27 +408,35 @@ class MessageHandler:
                 if unscheduled:
                     self.process_scheduling_for_interviewee(conversation_id, unscheduled[0]['number'])
                 else:
-                    self.complete_conversation(conversation_id)
+                    if self.scheduler.is_conversation_complete(conversation):
+                        self.complete_conversation(conversation_id)
+                    else:
+                        # If somehow there's partial state, finalize anyway
+                        self.complete_conversation(conversation_id)
+
             else:
-                timezone_str = interviewer.get('timezone', 'UTC')
-                current_time = get_localized_current_time(timezone_str)
                 system_message = (
-                    f"No valid slots were detected. Please try again.\n\n"
-                    f"Current Time: {current_time}"
+                    "Instruct the AI assistant to inform the interviewer that no valid time slots were detected in their message. "
+                    "Request them to please provide clear availability once again.\n\n"
+                    f"Current Local Time: {local_now}"
                 )
                 response = self.generate_response(interviewer, None, message, system_message)
                 self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                 self.send_message(interviewer['number'], response)
 
         else:
-            # Normal scenario: interviewer shares slots the first time
+            # Normal scenario: interviewer shares slots for the first time
             extracted_data = extract_slots_and_timezone(
                 message,
                 interviewer['number'],
                 interviewer.get('conversation_history', []),
                 interviewer.get('meeting_duration', 60)
             )
+            tz_str = interviewer.get('timezone', 'UTC')
+            local_now = get_localized_current_time(tz_str)
+
             if extracted_data and 'time_slots' in extracted_data:
+                # Store them as temp slots first, ask for confirmation
                 interviewer['temp_slots'] = extracted_data
                 interviewer['state'] = ConversationState.AWAITING_SLOT_CONFIRMATION.value
                 self.scheduler.mongodb_handler.update_conversation(conversation_id, {
@@ -396,26 +447,24 @@ class MessageHandler:
                 for slot in extracted_data.get("time_slots", []):
                     start_time = datetime.fromisoformat(slot['start_time'])
                     tz = extracted_data.get('timezone', 'UTC')
-                    formatted_slots.append(
-                        f"- {start_time.astimezone(pytz.timezone(tz)).strftime('%A, %B %d, %Y at %I:%M %p %Z')}"
-                    )
+                    local_str = start_time.astimezone(pytz.timezone(tz)).strftime('%A, %B %d, %Y at %I:%M %p %Z')
+                    formatted_slots.append(f"- {local_str}")
                 slots_text = "\n".join(formatted_slots)
-                current_time = get_localized_current_time(tz)
 
                 system_message = (
-                    f"Identified these time slots:\n\n{slots_text}\n\n"
-                    f"Reply 'yes' to confirm or 'no' to provide different slots.\n\n"
-                    f"Current Time: {current_time}"
+                    "Instruct the AI assistant to tell the interviewer that the following slots were identified:\n\n"
+                    f"{slots_text}\n\n"
+                    "Ask the interviewer to reply with 'yes' to confirm these slots or 'no' if they need to provide different slots.\n\n"
+                    f"Current Local Time: {local_now}"
                 )
                 response = self.generate_response(interviewer, None, message, system_message)
                 self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                 self.send_message(interviewer['number'], response)
             else:
-                timezone_str = interviewer.get('timezone', 'UTC')
-                current_time = get_localized_current_time(timezone_str)
                 system_message = (
-                    f"Could not understand your availability. Please provide it in a clear format.\n\n"
-                    f"Current Time: {current_time}"
+                    "Instruct the AI assistant to inform the interviewer that their availability could not be understood "
+                    "and to please provide it in a clear format.\n\n"
+                    f"Current Local Time: {local_now}"
                 )
                 response = self.generate_response(interviewer, None, message, system_message)
                 self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
@@ -441,6 +490,10 @@ class MessageHandler:
     def _handle_slot_acceptance(self, conversation_id: str, interviewee: dict, conversation: dict):
         reserved_slots = conversation.get('reserved_slots', [])
         available_slots = conversation.get('available_slots', [])
+        if not interviewee.get('proposed_slot'):
+            # Safety check in case there's no slot proposed
+            return
+
         accepted_slot_key = self._create_slot_key(interviewee['proposed_slot'])
 
         # Remove from reserved and global availability
@@ -478,19 +531,20 @@ class MessageHandler:
                 slot_denials[k] = set(val)
 
         denied_slot = interviewee['proposed_slot']
-        denied_slot_key = self._create_slot_key(denied_slot)
+        denied_slot_key = self._create_slot_key(denied_slot) if denied_slot else None
 
-        interviewee['offered_slots'] = interviewee.get('offered_slots', []) + [denied_slot]
+        interviewee['offered_slots'] = interviewee.get('offered_slots', []) + [denied_slot] if denied_slot else []
         interviewee['proposed_slot'] = None
 
-        reserved_slots = [
-            slot for slot in reserved_slots
-            if self._create_slot_key(slot) != denied_slot_key
-        ]
+        if denied_slot_key:
+            reserved_slots = [
+                slot for slot in reserved_slots
+                if self._create_slot_key(slot) != denied_slot_key
+            ]
 
-        if denied_slot_key not in slot_denials:
-            slot_denials[denied_slot_key] = set()
-        slot_denials[denied_slot_key].add(interviewee['number'])
+            if denied_slot_key not in slot_denials:
+                slot_denials[denied_slot_key] = set()
+            slot_denials[denied_slot_key].add(interviewee['number'])
 
         unscheduled_ies = [
             ie for ie in conversation['interviewees']
@@ -498,7 +552,7 @@ class MessageHandler:
         ]
         all_unscheduled_nums = {ie['number'] for ie in unscheduled_ies}
 
-        if slot_denials[denied_slot_key].issuperset(all_unscheduled_nums):
+        if denied_slot_key and slot_denials[denied_slot_key].issuperset(all_unscheduled_nums):
             before_count = len(available_slots)
             available_slots = [
                 slot for slot in available_slots
@@ -512,15 +566,16 @@ class MessageHandler:
                 )
 
         conversation['available_slots'] = available_slots
-
         conversation['slot_denials'] = {
             k: list(v) for k, v in slot_denials.items()
         }
 
+        # Reassign updated interviewee
         for i, ie in enumerate(conversation['interviewees']):
             if ie['number'] == interviewee['number']:
                 conversation['interviewees'][i] = interviewee
 
+        # Check if there are any untried slots left for this interviewee
         untried_slots = self._get_untried_slots_for_interviewee(interviewee, available_slots, reserved_slots)
         if untried_slots:
             interviewee['state'] = ConversationState.AWAITING_AVAILABILITY.value
@@ -587,7 +642,7 @@ class MessageHandler:
 
         pending = [ie for ie in unscheduled if ie['state'] == ConversationState.CONFIRMATION_PENDING.value]
         if pending:
-            logger.info("Some interviewees are in CONFIRMATION_PENDING; scheduling for others has continued in parallel.")
+            logger.info("Some interviewees are in CONFIRMATION_PENDING; scheduling can continue in parallel.")
             return
 
         if unscheduled:
@@ -604,6 +659,11 @@ class MessageHandler:
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         if not conversation:
             logger.error(f"Conversation {conversation_id} not found.")
+            return
+
+        # If the conversation is completed, do not proceed.
+        if conversation.get('status') == 'completed':
+            logger.info(f"Skipping scheduling for interviewee {interviewee_number} in a completed conversation.")
             return
 
         interviewee = next((ie for ie in conversation['interviewees']
@@ -635,14 +695,17 @@ class MessageHandler:
                 'reserved_slots': reserved_slots
             })
 
+            # Local time for interviewee
             timezone_str = interviewee.get('timezone', 'UTC')
             localized_start_time = datetime.fromisoformat(next_slot['start_time']).astimezone(
                 pytz.timezone(timezone_str)
             ).strftime('%A, %B %d, %Y at %I:%M %p %Z')
+            local_now = get_localized_current_time(timezone_str)
 
             system_message = (
-                f"Hi {interviewee['name']}! We've found a potential time for your interview: {localized_start_time}. "
-                f"Does this time work for you?"
+                f"Instruct the AI assistant to propose to {interviewee['name']} the time slot "
+                f"{localized_start_time} and ask if it works for them.\n\n"
+                f"Current Local Time: {local_now}"
             )
             response = self.generate_response(
                 interviewee,
@@ -680,6 +743,11 @@ class MessageHandler:
         if not interviewer:
             return
 
+        # If everything is actually scheduled, do not request more slots
+        if self.scheduler.is_conversation_complete(conversation):
+            self.complete_conversation(conversation_id)
+            return
+
         interviewer['state'] = ConversationState.AWAITING_MORE_SLOTS_FROM_INTERVIEWER.value
         conversation['more_slots_requests'] = conversation.get('more_slots_requests', 0) + 1
         conversation['last_more_slots_request_time'] = datetime.now(pytz.UTC).isoformat()
@@ -690,14 +758,15 @@ class MessageHandler:
             'last_more_slots_request_time': conversation['last_more_slots_request_time']
         })
 
-        timezone_str = interviewer.get('timezone', 'UTC')
-        current_time = get_localized_current_time(timezone_str)
+        tz_str = interviewer.get('timezone', 'UTC')
+        local_now = get_localized_current_time(tz_str)
         unscheduled_names = [ie['name'] for ie in unscheduled]
 
         system_message = (
-            f"All current slots have been tried. The following interviewees are still unscheduled: "
-            f"{', '.join(unscheduled_names)}. Could you please provide more availability?\n\n"
-            f"Current Time: {current_time}"
+            "Instruct the AI assistant to inform the interviewer that all current slots have been tried, "
+            f"and the following interviewees remain unscheduled: {', '.join(unscheduled_names)}. "
+            f"Request the interviewer to provide more availability.\n\n"
+            f"Current Local Time: {local_now}"
         )
         response = self.generate_response(
             interviewer,
@@ -712,8 +781,7 @@ class MessageHandler:
     def complete_conversation(self, conversation_id: str):
         """
         Mark conversation as completed & notify the interviewer. 
-        This defers final closure to InterviewScheduler.complete_conversation,
-        which now sends a summary to the interviewer and sets conversation status = completed.
+        Then let the InterviewScheduler do the final closure, which sends a summary.
         """
         try:
             conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
@@ -734,8 +802,8 @@ class MessageHandler:
             })
 
             interviewer = conversation['interviewer']
-            timezone_str = interviewer.get('timezone', 'UTC')
-            current_time = get_localized_current_time(timezone_str)
+            tz_str = interviewer.get('timezone', 'UTC')
+            local_now = get_localized_current_time(tz_str)
 
             if unscheduled:
                 note = f"Some interviewees could not be scheduled: {', '.join(unscheduled)}."
@@ -743,8 +811,9 @@ class MessageHandler:
                 note = "All interviews have been successfully scheduled."
 
             system_message = (
-                f"All scheduling steps have been completed. {note} "
-                f"Thank you!\n\nCurrent Time: {current_time}"
+                "Instruct the AI assistant to inform the interviewer that all scheduling steps have been completed. "
+                f"{note} Thank them for their cooperation.\n\n"
+                f"Current Local Time: {local_now}"
             )
             response = self.generate_response(
                 interviewer,
@@ -779,11 +848,18 @@ class MessageHandler:
             logger.error(f"Participant {participant_id} not found in conversation {conversation_id}.")
             return
 
-        timezone_str = participant.get('timezone', 'UTC')
-        current_time = get_localized_current_time(timezone_str)
+        # If the conversation is completed, do not send reminders.
+        if conversation.get('status') == 'completed':
+            logger.info(f"No reminder sent; conversation {conversation_id} is completed.")
+            return
+
+        tz_str = participant.get('timezone', 'UTC')
+        local_now = get_localized_current_time(tz_str)
+
         system_message = (
-            f"Hello, we haven't heard from you. Could you please provide an update?\n\n"
-            f"Current Time: {current_time}"
+            f"Instruct the AI assistant to send a reminder to {participant['name']} that no response has been received, "
+            f"and request an update regarding scheduling.\n\n"
+            f"Current Local Time: {local_now}"
         )
         response = self.generate_response(
             participant,
@@ -817,11 +893,11 @@ class MessageHandler:
                     'interviewees': conversation['interviewees']
                 })
 
-            current_time = get_localized_current_time(timezone)
+            local_now = get_localized_current_time(timezone)
             system_message = (
-                f"Thanks! I've set your timezone to {timezone}. "
-                f"Please share your availability for the upcoming interviews.\n\n"
-                f"Current Time: {current_time}"
+                f"Instruct the AI assistant to acknowledge that {participant['name']}'s timezone has been set to {timezone} "
+                f"and request them to provide availability for scheduling.\n\n"
+                f"Current Local Time: {local_now}"
             )
             response = self.generate_response(
                 participant,
@@ -841,6 +917,11 @@ class MessageHandler:
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         if not conversation:
             logger.error(f"Conversation {conversation_id} not found.")
+            return
+
+        # If the conversation is completed, skip initiating anything.
+        if conversation.get('status') == 'completed':
+            logger.info(f"Skipping conversation initiation for {interviewee_number} in completed conversation.")
             return
 
         interviewee = next((ie for ie in conversation['interviewees']
@@ -871,11 +952,10 @@ class MessageHandler:
                 'interviewees': conversation['interviewees']
             })
 
-            timezone_str = 'UTC'
-            current_time = get_localized_current_time(timezone_str)
+            local_now = get_localized_current_time('UTC')
             system_message = (
-                f"Hello {interviewee['name']}, please let me know your timezone to proceed.\n\n"
-                f"Current Time: {current_time}"
+                f"Instruct the AI assistant to ask {interviewee['name']} for their timezone to proceed with scheduling.\n\n"
+                f"Current Local Time (fallback UTC): {local_now}"
             )
             response = self.generate_response(
                 interviewee,
@@ -891,6 +971,11 @@ class MessageHandler:
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         if not conversation:
             logger.error(f"Conversation {conversation_id} not found.")
+            return
+
+        # If the conversation is completed, skip scheduling.
+        if conversation.get('status') == 'completed':
+            logger.info(f"Skipping scheduling for NO_SLOTS_AVAILABLE in conversation {conversation_id} (completed).")
             return
 
         no_slots_interviewees = [
@@ -910,6 +995,11 @@ class MessageHandler:
             logger.error(f"Conversation {conversation_id} not found.")
             return
 
+        # If the conversation is completed, skip scheduling.
+        if conversation.get('status') == 'completed':
+            logger.info(f"Skipping scheduling for AWAITING_AVAILABILITY in conversation {conversation_id} (completed).")
+            return
+
         awaiting = [
             ie for ie in conversation['interviewees']
             if ie['state'] == ConversationState.AWAITING_AVAILABILITY.value
@@ -927,14 +1017,19 @@ class MessageHandler:
         if participant.get('role') != 'interviewer':
             other_participant = conversation.get('interviewer')
 
-        timezone_str = participant.get('timezone', 'UTC')
-        current_time = get_localized_current_time(timezone_str)
+        tz_str = participant.get('timezone', 'UTC')
+        local_now = get_localized_current_time(tz_str)
+
+        system_message = (
+            "Instruct the AI assistant to address the participant's query and provide a helpful response.\n\n"
+            f"Current Local Time: {local_now}"
+        )
 
         response = self.generate_response(
             participant,
             other_participant,
             message,
-            system_message=f"Your query has been received.\n\nCurrent Time: {current_time}",
+            system_message=system_message,
             conversation_state=participant.get('state'),
             message_type='answer_query'
         )
@@ -944,6 +1039,8 @@ class MessageHandler:
     def handle_cancellation_request_interviewer(self, conversation_id: str, interviewer: dict, message: str):
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         state = interviewer.get('state')
+        tz_str = interviewer.get('timezone', 'UTC')
+        local_now = get_localized_current_time(tz_str)
 
         if state == ConversationState.AWAITING_CANCELLATION_INTERVIEWEE_NAME.value:
             interviewee_name = message.strip().lower()
@@ -951,9 +1048,10 @@ class MessageHandler:
                                 if ie['name'].lower() == interviewee_name), None)
 
             if not interviewee:
-                timezone_str = interviewer.get('timezone', 'UTC')
-                current_time = get_localized_current_time(timezone_str)
-                system_message = f"No interviewee named '{interviewee_name}' found.\n\nCurrent Time: {current_time}"
+                system_message = (
+                    f"Instruct the AI assistant to inform the interviewer that no interviewee named '{interviewee_name}' was found.\n\n"
+                    f"Current Local Time: {local_now}"
+                )
                 response = self.generate_response(interviewer, None, message, system_message)
                 self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                 self.send_message(interviewer['number'], response)
@@ -972,32 +1070,33 @@ class MessageHandler:
                         'interviewees': conversation['interviewees']
                     })
 
-                    timezone_str = interviewer.get('timezone', 'UTC')
-                    current_time = get_localized_current_time(timezone_str)
                     cancel_message = (
-                        f"The meeting between {interviewer['name']} and {interviewee['name']} "
-                        f"has been cancelled.\n\nCurrent Time: {current_time}"
+                        f"The meeting between {interviewer['name']} and {interviewee['name']} has been cancelled."
                     )
                     self.send_message(interviewer['number'], cancel_message)
                     self.send_message(interviewee['number'], cancel_message)
 
-                    system_message = f"Cancelled the meeting with {interviewee['name']}.\n\nCurrent Time: {current_time}"
+                    system_message = (
+                        f"Instruct the AI assistant to confirm for the interviewer that the meeting with "
+                        f"{interviewee['name']} has been cancelled.\n\n"
+                        f"Current Local Time: {local_now}"
+                    )
                     response = self.generate_response(interviewer, None, message, system_message)
                     self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                     self.send_message(interviewer['number'], response)
                 else:
-                    timezone_str = interviewer.get('timezone', 'UTC')
-                    current_time = get_localized_current_time(timezone_str)
                     system_message = (
-                        f"Failed to cancel due to an internal error.\n\nCurrent Time: {current_time}"
+                        "Instruct the AI assistant to inform the interviewer that the cancellation failed due to an internal error.\n\n"
+                        f"Current Local Time: {local_now}"
                     )
                     response = self.generate_response(interviewer, None, message, system_message)
                     self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                     self.send_message(interviewer['number'], response)
             else:
-                timezone_str = interviewer.get('timezone', 'UTC')
-                current_time = get_localized_current_time(timezone_str)
-                system_message = f"No scheduled meeting found with that interviewee.\n\nCurrent Time: {current_time}"
+                system_message = (
+                    f"Instruct the AI assistant to inform the interviewer that no scheduled meeting was found for {interviewee['name']}.\n\n"
+                    f"Current Local Time: {local_now}"
+                )
                 response = self.generate_response(interviewer, None, message, system_message)
                 self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                 self.send_message(interviewer['number'], response)
@@ -1011,15 +1110,16 @@ class MessageHandler:
                 self.complete_conversation(conversation_id)
 
         else:
-            timezone_str = interviewer.get('timezone', 'UTC')
-            current_time = get_localized_current_time(timezone_str)
-
             interviewer['state'] = ConversationState.AWAITING_CANCELLATION_INTERVIEWEE_NAME.value
             self.scheduler.mongodb_handler.update_conversation(conversation_id, {
                 'interviewer': interviewer
             })
 
-            system_message = f"Please provide the name of the interviewee to cancel.\n\nCurrent Time: {current_time}"
+            system_message = (
+                "Instruct the AI assistant to ask the interviewer for the name of the interviewee whose meeting "
+                "they wish to cancel.\n\n"
+                f"Current Local Time: {local_now}"
+            )
             response = self.generate_response(interviewer, None, message, system_message)
             self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
             self.send_message(interviewer['number'], response)
@@ -1027,6 +1127,9 @@ class MessageHandler:
     def handle_cancellation_request_interviewee(self, conversation_id: str, interviewee: dict, message: str):
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         interviewer = conversation.get('interviewer')
+
+        tz_str = interviewee.get('timezone', 'UTC')
+        local_now = get_localized_current_time(tz_str)
 
         extracted_name = self.llm_model.extract_interviewee_name(message)
         if extracted_name:
@@ -1049,62 +1152,53 @@ class MessageHandler:
                             'interviewees': conversation['interviewees']
                         })
 
-                        timezone_str = interviewer.get('timezone', 'UTC')
-                        current_time = get_localized_current_time(timezone_str)
                         cancel_message = (
-                            f"The meeting between {interviewer['name']} and {interviewee_obj['name']} "
-                            f"has been cancelled.\n\nCurrent Time: {current_time}"
+                            f"The meeting between {interviewer['name']} and {interviewee_obj['name']} has been cancelled."
                         )
                         self.send_message(interviewer['number'], cancel_message)
                         self.send_message(interviewee_obj['number'], cancel_message)
 
                         system_message = (
-                            f"Cancelled the meeting with {interviewee_obj['name']}.\n\n"
-                            f"Current Time: {current_time}"
+                            f"Instruct the AI assistant to confirm that the meeting with {interviewee_obj['name']} was cancelled.\n\n"
+                            f"Current Local Time: {local_now}"
                         )
                         response = self.generate_response(interviewee_obj, None, message, system_message)
                         self.scheduler.log_conversation(conversation_id, interviewee_obj['number'], "system", response, "AI")
                         self.send_message(interviewee_obj['number'], response)
                     else:
-                        timezone_str = interviewer.get('timezone', 'UTC')
-                        current_time = get_localized_current_time(timezone_str)
                         system_message = (
-                            f"Failed to cancel due to an internal error.\n\nCurrent Time: {current_time}"
+                            "Instruct the AI assistant to inform the participant that the cancellation failed due to an internal error.\n\n"
+                            f"Current Local Time: {local_now}"
                         )
                         response = self.generate_response(interviewee_obj, None, message, system_message)
                         self.scheduler.log_conversation(conversation_id, interviewee_obj['number'], "system", response, "AI")
                         self.send_message(interviewee_obj['number'], response)
                 else:
-                    timezone_str = interviewer.get('timezone', 'UTC')
-                    current_time = get_localized_current_time(timezone_str)
                     system_message = (
-                        f"No scheduled meeting found with that interviewee.\n\nCurrent Time: {current_time}"
+                        f"Instruct the AI assistant to inform the participant that no scheduled meeting was found for {interviewee_obj['name']}.\n\n"
+                        f"Current Local Time: {local_now}"
                     )
                     response = self.generate_response(interviewee_obj, None, message, system_message)
                     self.scheduler.log_conversation(conversation_id, interviewee_obj['number'], "system", response, "AI")
                     self.send_message(interviewee_obj['number'], response)
             else:
-                timezone_str = interviewer.get('timezone', 'UTC')
-                current_time = get_localized_current_time(timezone_str)
                 system_message = (
-                    f"No interviewee found with that name. Please provide a valid interviewee's name to cancel.\n\n"
-                    f"Current Time: {current_time}"
+                    f"Instruct the AI assistant to inform the interviewee that no interviewee named '{extracted_name}' was found.\n\n"
+                    f"Current Local Time: {local_now}"
                 )
                 response = self.generate_response(interviewee, None, message, system_message)
                 self.scheduler.log_conversation(conversation_id, interviewee['number'], "system", response, "AI")
                 self.send_message(interviewee['number'], response)
         else:
-            timezone_str = interviewee.get('timezone', 'UTC')
-            current_time = get_localized_current_time(timezone_str)
-
             interviewee['state'] = ConversationState.AWAITING_INTERVIEWEE_NAME.value
             self.scheduler.mongodb_handler.update_conversation(conversation_id, {
                 'interviewees': conversation['interviewees']
             })
 
             system_message = (
-                f"Please provide the name of the interviewee whose interview you wish to cancel.\n\n"
-                f"Current Time: {current_time}"
+                "Instruct the AI assistant to ask the interviewee for the name of the interviewee whose interview "
+                "they wish to cancel.\n\n"
+                f"Current Local Time: {local_now}"
             )
             response = self.generate_response(interviewee, None, message, system_message)
             self.scheduler.log_conversation(conversation_id, interviewee['number'], "system", response, "AI")
@@ -1113,10 +1207,14 @@ class MessageHandler:
     def handle_reschedule_request_interviewer(self, conversation_id: str, interviewer: dict, message: str):
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         scheduled = [ie for ie in conversation['interviewees'] if ie.get('event_id')]
+        tz_str = interviewer.get('timezone', 'UTC')
+        local_now = get_localized_current_time(tz_str)
+
         if not scheduled:
-            timezone_str = interviewer.get('timezone', 'UTC')
-            current_time = get_localized_current_time(timezone_str)
-            system_message = f"No scheduled meeting found to reschedule.\n\nCurrent Time: {current_time}"
+            system_message = (
+                "Instruct the AI assistant to inform the interviewer that no scheduled meeting was found to reschedule.\n\n"
+                f"Current Local Time: {local_now}"
+            )
             response = self.generate_response(interviewer, None, message, system_message)
             self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
             self.send_message(interviewer['number'], response)
@@ -1138,11 +1236,10 @@ class MessageHandler:
                         'interviewees': conversation['interviewees']
                     })
 
-                    timezone_str = interviewer.get('timezone', 'UTC')
-                    current_time = get_localized_current_time(timezone_str)
                     system_message = (
-                        f"Rescheduling the meeting with {target_ie['name']}.\n\n"
-                        f"Current Time: {current_time}"
+                        f"Instruct the AI assistant to inform the interviewer that the meeting with {target_ie['name']} "
+                        f"is being rescheduled and to proceed with collecting new availability.\n\n"
+                        f"Current Local Time: {local_now}"
                     )
                     response = self.generate_response(interviewer, None, message, system_message)
                     self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
@@ -1150,34 +1247,31 @@ class MessageHandler:
 
                     self.process_scheduling_for_interviewee(conversation_id, target_ie['number'])
                 else:
-                    timezone_str = interviewer.get('timezone', 'UTC')
-                    current_time = get_localized_current_time(timezone_str)
                     system_message = (
-                        f"Failed to reschedule due to an internal error. Please try again later.\n\n"
-                        f"Current Time: {current_time}"
+                        "Instruct the AI assistant to inform the interviewer that the rescheduling failed due to an internal error.\n\n"
+                        f"Current Local Time: {local_now}"
                     )
                     response = self.generate_response(interviewer, None, message, system_message)
                     self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                     self.send_message(interviewer['number'], response)
             else:
-                timezone_str = interviewer.get('timezone', 'UTC')
-                current_time = get_localized_current_time(timezone_str)
-                system_message = f"No scheduled meeting found for that participant.\n\nCurrent Time: {current_time}"
+                system_message = (
+                    f"Instruct the AI assistant to inform the interviewer that no scheduled meeting was found for {target_ie['name']}.\n\n"
+                    f"Current Local Time: {local_now}"
+                )
                 response = self.generate_response(interviewer, None, message, system_message)
                 self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
                 self.send_message(interviewer['number'], response)
         else:
-            timezone_str = interviewer.get('timezone', 'UTC')
-            current_time = get_localized_current_time(timezone_str)
-
             interviewer['state'] = ConversationState.AWAITING_CANCELLATION_INTERVIEWEE_NAME.value
             self.scheduler.mongodb_handler.update_conversation(conversation_id, {
                 'interviewer': interviewer
             })
 
             system_message = (
-                f"Multiple scheduled interviews found. Please provide the interviewee's name to reschedule.\n\n"
-                f"Current Time: {current_time}"
+                "Instruct the AI assistant to ask the interviewer which interviewee's meeting they wish to reschedule, "
+                "since multiple interviews are scheduled.\n\n"
+                f"Current Local Time: {local_now}"
             )
             response = self.generate_response(interviewer, None, message, system_message)
             self.scheduler.log_conversation(conversation_id, 'interviewer', "system", response, "AI")
@@ -1186,6 +1280,9 @@ class MessageHandler:
     def handle_reschedule_request_interviewee(self, conversation_id: str, interviewee: dict, message: str):
         conversation = self.scheduler.mongodb_handler.get_conversation(conversation_id)
         event_id = interviewee.get('event_id')
+        tz_str = interviewee.get('timezone', 'UTC')
+        local_now = get_localized_current_time(tz_str)
+
         if event_id:
             delete_success = self.scheduler.calendar_service.delete_event(event_id)
             if delete_success:
@@ -1200,21 +1297,17 @@ class MessageHandler:
                 })
                 self.process_scheduling_for_interviewee(conversation_id, interviewee['number'])
             else:
-                timezone_str = interviewee.get('timezone', 'UTC')
-                current_time = get_localized_current_time(timezone_str)
                 system_message = (
-                    f"Failed to reschedule due to an internal error. Please try again later.\n\n"
-                    f"Current Time: {current_time}"
+                    "Instruct the AI assistant to inform the interviewee that the rescheduling failed due to an internal error.\n\n"
+                    f"Current Local Time: {local_now}"
                 )
                 response = self.generate_response(interviewee, None, message, system_message)
                 self.scheduler.log_conversation(conversation_id, interviewee['number'], "system", response, "AI")
                 self.send_message(interviewee['number'], response)
         else:
-            timezone_str = interviewee.get('timezone', 'UTC')
-            current_time = get_localized_current_time(timezone_str)
             system_message = (
-                f"No scheduled meeting found to reschedule.\n\n"
-                f"Current Time: {current_time}"
+                "Instruct the AI assistant to inform the interviewee that no scheduled meeting was found to reschedule.\n\n"
+                f"Current Local Time: {local_now}"
             )
             response = self.generate_response(interviewee, None, message, system_message)
             self.scheduler.log_conversation(conversation_id, interviewee['number'], "system", response, "AI")
