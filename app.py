@@ -59,13 +59,14 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max-limit
 CORS(app, resources={
     r"/api/*": {
         "origins": ["http://localhost:3000", "http://localhost:8080"],
-        "methods": ["GET", "POST", "OPTIONS"],
+        "methods": ["GET", "POST", "DELETE", "OPTIONS"],  # Added "DELETE" here
         "allow_headers": ["Content-Type", "x-api-key", "Authorization"],
         "expose_headers": ["Content-Type", "x-api-key"],
         "supports_credentials": False,
         "send_wildcard": False
     }
 })
+
 # Register the oauth2callback route
 app.add_url_rule('/oauth2callback', 'oauth2callback', oauth2callback, methods=['GET'])
 
@@ -96,7 +97,6 @@ def require_api_key(f):
     return decorated_function
 
 def validate_csv_headers(headers: List[str]) -> Tuple[bool, str]:
-    """Validate that all required headers are present in the CSV."""
     required_headers = {
         'interviewer_name', 'interviewer_number', 'interviewer_email',
         'interviewee_name', 'interviewee_number', 'interviewee_email',
@@ -111,10 +111,6 @@ def validate_csv_headers(headers: List[str]) -> Tuple[bool, str]:
     return True, ""
 
 def process_csv_data(csv_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Process CSV data into the format required by the initialize endpoint.
-    Groups interviewees by interviewer.
-    """
     conversations = {}
     
     for row in csv_data:
@@ -124,7 +120,6 @@ def process_csv_data(csv_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             row['interviewer_email']
         )
         
-        # Create interviewee data
         interviewee = {
             'name': row['interviewee_name'],
             'number': row['interviewee_number'],
@@ -132,7 +127,6 @@ def process_csv_data(csv_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             'jd_title': row['jd_title']
         }
         
-        # Initialize conversation if new interviewer
         if interviewer_key not in conversations:
             conversations[interviewer_key] = {
                 'interviewer_name': row['interviewer_name'],
@@ -151,7 +145,6 @@ def process_csv_data(csv_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     
     return list(conversations.values())
 
-# Helper function to validate timezone
 def validate_timezone(timezone: str) -> bool:
     try:
         pytz.timezone(timezone)
@@ -159,7 +152,6 @@ def validate_timezone(timezone: str) -> bool:
     except pytz.UnknownTimeZoneError:
         return False
 
-# Authenticate with Google Calendar on a separate background thread
 def authenticate_google_calendar_background():
     def authenticate_task():
         while True:
@@ -168,25 +160,20 @@ def authenticate_google_calendar_background():
                 if not creds.valid:
                     raise ValueError("Invalid credentials, re-authentication required.")
                 logger.info("Google Calendar is already authenticated.")
-                break  # Exit loop once authenticated
+                break
             except Exception as e:
                 logger.warning(f"Google Calendar authentication required: {str(e)}")
-                auth_url = authenticate()  # Generate the authentication URL
+                auth_url = authenticate()  
                 logger.info(f"Please complete the Google Calendar authentication: {auth_url}")
-                # Sleep and retry after some time if authentication is needed
-                time.sleep(10)  # Retry every 10 seconds if not authenticated
-
-    # Start the background thread
+                time.sleep(10)  
     auth_thread = threading.Thread(target=authenticate_task)
     auth_thread.daemon = True
     auth_thread.start()
 
-# Initialize background thread for authentication
 authenticate_google_calendar_background()
 
 ### API Endpoints ###
 
-# Serve frontend in production
 @app.route('/')
 def serve_frontend():
     return send_from_directory('../frontend/dist', 'index.html')
@@ -195,10 +182,8 @@ def serve_frontend():
 def serve_static(path):
     return send_from_directory('../frontend/dist', path)
 
-
 @app.route('/api/test', methods=['GET'])
 def test_endpoint() -> Tuple[Response, int]:
-    """Simple test endpoint to verify that the API is running."""
     logger.info("Test endpoint was called")
     return jsonify({
         "status": "healthy",
@@ -208,41 +193,28 @@ def test_endpoint() -> Tuple[Response, int]:
 
 @app.route('/api/twilio-webhook', methods=['POST'])
 def twilio_webhook() -> Response:
-    """Handles incoming Twilio messages with improved signature validation."""
-    # Get the original Twilio signature from the request
     twilio_signature = request.headers.get('X-TWILIO-SIGNATURE', '')
-
-    # Get the raw form data
     post_data = request.form.to_dict()
     message_sid = post_data.get('MessageSid')
 
-    # Check if the request has been processed before using MessageSid
     if not message_sid:
         logger.error("MessageSid missing in request.")
         return Response("Missing MessageSid", status=400)
 
-    if message_sid in app.config.get('PROCESSED_SIDS', set()):
+    if 'PROCESSED_SIDS' not in app.config:
+        app.config['PROCESSED_SIDS'] = set()
+
+    if message_sid in app.config['PROCESSED_SIDS']:
         logger.info(f"Duplicate request detected for MessageSid: {message_sid}")
         return Response("Duplicate request", status=200)
 
-    # Add the MessageSid to processed set
-    if 'PROCESSED_SIDS' not in app.config:
-        app.config['PROCESSED_SIDS'] = set()
     app.config['PROCESSED_SIDS'].add(message_sid)
 
-    # Construct the canonical URL that Twilio used for signing
     proto = request.headers.get('X-Forwarded-Proto', request.scheme)
     host = request.headers.get('X-Forwarded-Host', request.host)
-
-    # Construct the full URL keeping only the components Twilio uses for signing
     url = f"{proto}://{host}{request.path}"
 
-    # Validate the signature
-    is_valid = validator.validate(
-        url,
-        post_data,
-        twilio_signature
-    )
+    is_valid = validator.validate(url, post_data, twilio_signature)
 
     if not is_valid:
         logger.warning(
@@ -253,13 +225,11 @@ def twilio_webhook() -> Response:
         )
         return Response("Invalid signature", status=403)
 
-    # If signature is valid, process the message
     return handle_incoming_message(request)
 
 @app.route('/api/upload-csv', methods=['POST'])
 @require_api_key
 def upload_csv():
-    """Handle CSV file upload and initialize conversations."""
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
     
@@ -271,11 +241,9 @@ def upload_csv():
         return jsonify({'error': 'File must be a CSV'}), 400
     
     try:
-        # Read CSV content
         stream = io.StringIO(file.stream.read().decode("UTF8"), newline=None)
         csv_data = list(csv.DictReader(stream))
         
-        # Validate headers
         if not csv_data:
             return jsonify({'error': 'CSV file is empty'}), 400
         
@@ -283,10 +251,8 @@ def upload_csv():
         if not headers_valid:
             return jsonify({'error': error_message}), 400
         
-        # Process CSV data into conversations
         conversations = process_csv_data(csv_data)
         
-        # Initialize conversations using existing endpoint logic
         results = []
         for conv_data in conversations:
             try:
@@ -329,7 +295,6 @@ def upload_csv():
 @app.route('/api/initialize', methods=['POST'])
 @require_api_key
 def initialize() -> Tuple[Response, int]:
-    """Initializes multiple new interview scheduling conversations with validation."""
     data = request.json
 
     if not data or 'conversations' not in data:
@@ -341,7 +306,6 @@ def initialize() -> Tuple[Response, int]:
 
     results = []
     for idx, convo in enumerate(conversations):
-        # Define required fields for the conversation
         required_fields = {
             'interviewer_name': str,
             'interviewer_number': str,
@@ -355,7 +319,6 @@ def initialize() -> Tuple[Response, int]:
             'company_details': str
         }
 
-        # Check for missing required fields in the conversation
         missing_fields = [field for field in required_fields if field not in convo]
         if missing_fields:
             results.append({
@@ -365,7 +328,6 @@ def initialize() -> Tuple[Response, int]:
             })
             continue
 
-        # Validate interviewees list
         interviewees = convo['interviewees']
         if not isinstance(interviewees, list) or not interviewees:
             results.append({
@@ -375,10 +337,7 @@ def initialize() -> Tuple[Response, int]:
             })
             continue
 
-        # Define required fields for each interviewee, including 'jd_title'
         required_interviewee_fields = ['name', 'number', 'email', 'jd_title']
-
-        # Check for missing required fields in each interviewee
         invalid_interviewees = [
             ie for ie in interviewees
             if not all(k in ie for k in required_interviewee_fields)
@@ -392,7 +351,6 @@ def initialize() -> Tuple[Response, int]:
             continue
 
         try:
-            # Initialize each conversation
             conversation_id = initialize_conversation(
                 interviewer_name=convo['interviewer_name'],
                 interviewer_number=convo['interviewer_number'],
@@ -427,7 +385,6 @@ def initialize() -> Tuple[Response, int]:
 @app.route('/api/create_event/<conversation_id>', methods=['POST'])
 @require_api_key
 def api_create_event_endpoint(conversation_id: str) -> Tuple[Response, int]:
-    """Creates a Google Calendar event for a specific interviewee."""
     logger.info(f"Creating calendar event for conversation {conversation_id}")
 
     data = request.get_json()
@@ -436,10 +393,7 @@ def api_create_event_endpoint(conversation_id: str) -> Tuple[Response, int]:
         return jsonify({"error": "Missing interviewee_number in request body"}), 400
 
     try:
-        # Instantiate CalendarService
         calendar_service = CalendarService()
-        
-        # Call the instance method with both arguments
         event_response, error = calendar_service.create_event(conversation_id, interviewee_number)
         
         if error:
@@ -448,7 +402,6 @@ def api_create_event_endpoint(conversation_id: str) -> Tuple[Response, int]:
                 return redirect(auth_url)
             return jsonify({"error": error}), 400
 
-        # Extract 'event_id' from event_response
         event_id = event_response.get('event_id')
 
         if not event_id:
@@ -468,7 +421,6 @@ def api_create_event_endpoint(conversation_id: str) -> Tuple[Response, int]:
 
 @app.route('/api/authenticate/<conversation_id>', methods=['GET'])
 def auth_schedule(conversation_id: str) -> Response:
-    """Initiates OAuth 2.0 flow with error handling."""
     try:
         authorization_url = authenticate(conversation_id)
         logger.info(f"Redirecting to OAuth2 consent screen for conversation {conversation_id}")
@@ -476,37 +428,46 @@ def auth_schedule(conversation_id: str) -> Response:
     except Exception as e:
         logger.error(f"OAuth2 flow initialization error: {str(e)}")
         return jsonify({"error": "Authentication initialization failed"}), 500
-    
+
 @app.route('/api/conversations/active', methods=['GET'])
 @require_api_key
 def get_active_conversations():
-    """Get all active conversations."""
-    print("Received request for active conversations")  # Debug log
-    print("Headers:", request.headers)  # Debug log
+    logger.info("Received request for active conversations")
     try:
+        all_conversations = scheduler.mongodb_handler.get_all_conversations()
         active_conversations = []
-        for conversation in scheduler.conversations.values():
-            if any(ie['state'] != ConversationState.SCHEDULED.value 
-                  and ie['state'] != ConversationState.CANCELLED.value 
-                  for ie in conversation['interviewees']):
+
+        for conversation in all_conversations:
+            conversation_id = conversation['conversation_id']
+            interviewer = conversation['interviewer']
+            interviewees = conversation.get('interviewees', [])
+
+            # Check if any interviewee is not SCHEDULED or CANCELLED
+            active = any(
+                ie['state'] not in [ConversationState.SCHEDULED.value, ConversationState.CANCELLED.value]
+                for ie in interviewees
+            )
+
+            if active:
                 active_conversations.append({
-                    'id': conversation['conversation_id'],
-                    'interviewer_name': conversation['interviewer']['name'],
-                    'interviewer_email': conversation['interviewer']['email'],
-                    'interviewer_number': conversation['interviewer']['number'],
+                    'id': conversation_id,
+                    'interviewer_name': interviewer['name'],
+                    'interviewer_email': interviewer['email'],
+                    'interviewer_number': interviewer['number'],
                     'interviewees': [{
                         'id': str(idx),
                         'name': ie['name'],
                         'email': ie['email'],
                         'number': ie['number'],
                         'status': ie['state']
-                    } for idx, ie in enumerate(conversation['interviewees'])],
+                    } for idx, ie in enumerate(interviewees)],
                     'status': 'active',
                     'last_activity': conversation.get('last_response_times', {}).get(
-                        conversation['interviewer']['number'],
+                        interviewer['number'],
                         datetime.now().isoformat()
                     )
                 })
+
         return jsonify(active_conversations), 200
     except Exception as e:
         logger.error(f"Error fetching active conversations: {str(e)}")
@@ -515,81 +476,141 @@ def get_active_conversations():
 @app.route('/api/interviews/scheduled', methods=['GET'])
 @require_api_key
 def get_scheduled_interviews():
-    """Get all scheduled interviews."""
     try:
+        all_conversations = scheduler.mongodb_handler.get_all_conversations()
         scheduled_interviews = []
-        for conversation in scheduler.conversations.values():
-            for interviewee in conversation['interviewees']:
+
+        for conversation in all_conversations:
+            interviewer = conversation['interviewer']
+            interviewees = conversation.get('interviewees', [])
+
+            for interviewee in interviewees:
                 if (interviewee['state'] == ConversationState.SCHEDULED.value 
                     and interviewee.get('scheduled_slot')):
                     scheduled_interviews.append({
                         'id': str(uuid.uuid4()),
                         'title': f"Interview with {interviewee['name']}",
-                        'interviewer_name': conversation['interviewer']['name'],
-                        'interviewer_email': conversation['interviewer']['email'],
-                        'interviewer_number': conversation['interviewer']['number'],
+                        'interviewer_name': interviewer['name'],
+                        'interviewer_email': interviewer['email'],
+                        'interviewer_number': interviewer['number'],
                         'interviewee_name': interviewee['name'],
                         'interviewee_email': interviewee['email'],
                         'interviewee_number': interviewee['number'],
                         'scheduled_time': interviewee['scheduled_slot']['start_time'],
                         'status': 'scheduled'
                     })
+
         return jsonify(scheduled_interviews), 200
     except Exception as e:
         logger.error(f"Error fetching scheduled interviews: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
+    
+@app.route('/api/conversations/completed', methods=['GET'])
+@require_api_key
+def get_completed_conversations():
+    logger.info("Received request for completed conversations")
+    try:
+        all_conversations = scheduler.mongodb_handler.get_all_conversations()
+        completed_conversations = []
 
+        for conversation in all_conversations:
+            if conversation.get('status') == 'completed':
+                interviewer = conversation['interviewer']
+                interviewees = conversation.get('interviewees', [])
+
+                completed_conversations.append({
+                    'id': conversation['conversation_id'],
+                    'interviewer_name': interviewer['name'],
+                    'interviewer_email': interviewer['email'],
+                    'interviewer_number': interviewer['number'],
+                    'interviewees': [{
+                        'id': str(idx),
+                        'name': ie['name'],
+                        'email': ie['email'],
+                        'number': ie['number'],
+                        'status': ie['state']
+                    } for idx, ie in enumerate(interviewees)],
+                    'status': 'completed',
+                    'completed_at': conversation.get('completed_at', ''),
+                    'last_activity': conversation.get('last_response_times', {}).get(
+                        interviewer['number'],
+                        conversation.get('completed_at', datetime.now().isoformat())
+                    )
+                })
+
+        return jsonify(completed_conversations), 200
+    except Exception as e:
+        logger.error(f"Error fetching completed conversations: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+    
 @app.route('/api/attention-flags', methods=['GET'])
 @require_api_key
-def get_attention_flags():
-    """Get all attention flags."""
+def get_all_attention_flags():
+    logger.info("Received request for all attention flags")
     try:
-        flags = []
-        current_time = datetime.now(pytz.UTC)
-        for conversation in scheduler.conversations.values():
-            flags_dict = scheduler.evaluator.evaluate_conversation_flags(
-                conversation, current_time
-            )
-            for participant_id, participant_flags in flags_dict.items():
-                for flag in participant_flags:
-                    flags.append({
-                        'id': str(uuid.uuid4()),
-                        'conversation_id': conversation['conversation_id'],
-                        'message': f"Attention required for {participant_id}: {flag.value}",
-                        'severity': 'high',
-                        'created_at': datetime.now().isoformat(),
-                        'resolved': False
-                    })
-        return jsonify(flags), 200
+        attention_flags = scheduler.mongodb_handler.get_all_attention_flags()
+        return jsonify(attention_flags), 200
     except Exception as e:
-        logger.error(f"Error fetching attention flags: {str(e)}")
+        logger.error(f"Error fetching all attention flags: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/api/conversations/<conversation_id>/attention-flags', methods=['GET'])
+@require_api_key
+def get_conversation_attention_flags(conversation_id: str):
+    logger.info(f"Received request for attention flags of conversation {conversation_id}")
+    try:
+        attention_flags = scheduler.mongodb_handler.get_attention_flags(conversation_id)
+        return jsonify(attention_flags), 200
+    except Exception as e:
+        logger.error(f"Error fetching attention flags for conversation {conversation_id}: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+    
 
 @app.route('/api/attention-flags/<flag_id>/resolve', methods=['POST'])
 @require_api_key
 def resolve_attention_flag(flag_id):
-    """Mark an attention flag as resolved."""
     try:
-        # In a real implementation, you would update the flag status in your database
-        return jsonify({'message': 'Flag resolved successfully'}), 200
+        # Update the flag as resolved in the database
+        result = scheduler.mongodb_handler.resolve_attention_flag(flag_id)
+        if result:
+            logger.info(f"Flag {flag_id} resolved successfully.")
+            return jsonify({'message': 'Flag resolved successfully'}), 200
+        else:
+            logger.warning(f"Flag {flag_id} not found.")
+            return jsonify({'error': 'Flag not found'}), 404
     except Exception as e:
-        logger.error(f"Error resolving attention flag: {str(e)}")
+        logger.error(f"Error resolving attention flag {flag_id}: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
 
-# Health check endpoint
+@app.route('/api/conversations/<conversation_id>', methods=['DELETE'])
+@require_api_key
+def delete_conversation(conversation_id: str):
+    logger.info(f"Received request to delete conversation {conversation_id}")
+    try:
+        # Delete the conversation
+        result = scheduler.mongodb_handler.delete_conversation(conversation_id)
+        if result:
+            logger.info(f"Conversation {conversation_id} deleted successfully.")
+            return jsonify({'message': f'Conversation {conversation_id} deleted successfully.'}), 200
+        else:
+            logger.warning(f"Conversation {conversation_id} not found.")
+            return jsonify({'error': 'Conversation not found'}), 404
+    except Exception as e:
+        logger.error(f"Error deleting conversation {conversation_id}: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
 @app.route('/api/health', methods=['GET'])
 def health_check() -> Tuple[Response, int]:
-    """Comprehensive health check endpoint."""
     try:
-        # Check MongoDB connection
         MONGODB_URI = os.getenv("MONGODB_URI")
         client = MongoClient(MONGODB_URI)
-        client.admin.command('ping')  # Check connection
+        client.admin.command('ping')  
         client.close()
 
         return jsonify({
             "status": "healthy",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().isoformat(),
             "environment": ENVIRONMENT,
             "database": "connected",
             "version": "1.0.0"
@@ -606,7 +627,6 @@ if __name__ == "__main__":
     port = int(os.getenv('PORT', 5000))
     debug = ENVIRONMENT == 'development'
 
-    # Additional security headers middleware
     @app.after_request
     def add_security_headers(response):
         response.headers['X-Content-Type-Options'] = 'nosniff'

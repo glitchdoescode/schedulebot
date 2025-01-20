@@ -2,19 +2,48 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Calendar, Clock, User, AlertCircle, Mail, Phone, Loader2 } from 'lucide-react';
+import { Calendar, Clock, User, AlertCircle, Mail, Phone, Loader2, Trash2 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
-import { getActiveConversations, getScheduledInterviews, getAttentionFlags } from '@/services/api';
+import { 
+  getActiveConversations, 
+  getCompletedConversations, 
+  getAttentionFlags, 
+  deleteConversation, 
+  resolveAttentionFlag,
+  getScheduledInterviews 
+} from '@/services/api';
 import type { ActiveConversation, ScheduledInterview, AttentionFlag } from '@/types/api';
+
+// Type guard to ensure flag conforms to AttentionFlag interface
+const isValidAttentionFlag = (flag: unknown): flag is AttentionFlag => {
+  if (typeof flag !== 'object' || flag === null) {
+    return false;
+  }
+
+  const flagObj = flag as Record<string, unknown>;
+
+  return (
+    typeof flagObj.id === 'string' &&
+    typeof flagObj.conversation_id === 'string' &&
+    typeof flagObj.message === 'string' &&
+    typeof flagObj.severity === 'string' &&
+    ['low', 'medium', 'high'].includes(flagObj.severity) &&
+    typeof flagObj.created_at === 'string' &&
+    typeof flagObj.resolved === 'boolean'
+  );
+};
 
 const MonitoringDashboard = () => {
   const [activeConversations, setActiveConversations] = useState<ActiveConversation[]>([]);
+  const [completedConversations, setCompletedConversations] = useState<ActiveConversation[]>([]);
   const [scheduledInterviews, setScheduledInterviews] = useState<ScheduledInterview[]>([]);
   const [attentionFlags, setAttentionFlags] = useState<AttentionFlag[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [deleteStatus, setDeleteStatus] = useState<{ [key: string]: 'idle' | 'deleting' | 'success' | 'error' }>({});
+  const [resolveStatus, setResolveStatus] = useState<{ [key: string]: 'idle' | 'resolving' | 'success' | 'error' }>({});
 
   useEffect(() => {
     fetchData();
@@ -27,20 +56,50 @@ const MonitoringDashboard = () => {
     setIsLoading(true);
     setError(null);
     try {
-      const [conversations, interviews, flags] = await Promise.all([
+      const [activeConvs, completedConvs, flags, scheduled] = await Promise.all([
         getActiveConversations().catch(() => []),
-        getScheduledInterviews().catch(() => []),
-        getAttentionFlags().catch(() => [])
+        getCompletedConversations().catch(() => []),
+        getAttentionFlags().catch(() => []),
+        getScheduledInterviews().catch(() => [])
       ]);
       
-      setActiveConversations(conversations);
-      setScheduledInterviews(interviews);
-      setAttentionFlags(flags);
+      setActiveConversations(activeConvs);
+      setCompletedConversations(completedConvs);
+      setAttentionFlags(flags.filter(isValidAttentionFlag)); // Apply type guard
+      setScheduledInterviews(scheduled);
     } catch (error) {
       console.error('Error fetching data:', error);
       setError('Failed to fetch monitoring data. Please try again later.');
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleDelete = async (conversationId: string) => {
+    setDeleteStatus(prev => ({ ...prev, [conversationId]: 'deleting' }));
+    try {
+      await deleteConversation(conversationId);
+      setActiveConversations(prev => prev.filter(conv => conv.id !== conversationId));
+      setCompletedConversations(prev => prev.filter(conv => conv.id !== conversationId));
+      setDeleteStatus(prev => ({ ...prev, [conversationId]: 'success' }));
+    } catch (error) {
+      console.error('Error deleting conversation:', error);
+      setDeleteStatus(prev => ({ ...prev, [conversationId]: 'error' }));
+      alert('Failed to delete conversation. Please try again.');
+    }
+  };
+
+  const handleResolveFlag = async (flagId: string) => {
+    setResolveStatus(prev => ({ ...prev, [flagId]: 'resolving' }));
+    try {
+      await resolveAttentionFlag(flagId);
+      setResolveStatus(prev => ({ ...prev, [flagId]: 'success' }));
+      // Refresh data to reflect resolved flags
+      fetchData();
+    } catch (error) {
+      console.error('Error resolving attention flag:', error);
+      setResolveStatus(prev => ({ ...prev, [flagId]: 'error' }));
+      alert('Failed to resolve attention flag. Please try again.');
     }
   };
 
@@ -84,9 +143,12 @@ const MonitoringDashboard = () => {
         <h1 className="text-3xl font-bold text-gray-900 mb-8">Interview Monitoring Dashboard</h1>
         
         <Tabs defaultValue="conversations" className="space-y-8">
-          <TabsList className="grid w-full grid-cols-3 gap-4">
+          <TabsList className="grid w-full grid-cols-4 gap-4">
             <TabsTrigger value="conversations" className="text-gray-900">
               Active Conversations ({activeConversations.length})
+            </TabsTrigger>
+            <TabsTrigger value="completed" className="text-gray-900">
+              Completed Conversations ({completedConversations.length})
             </TabsTrigger>
             <TabsTrigger value="scheduled" className="text-gray-900">
               Scheduled Interviews ({scheduledInterviews.length})
@@ -101,6 +163,7 @@ const MonitoringDashboard = () => {
             </TabsTrigger>
           </TabsList>
 
+          {/* Active Conversations Tab */}
           <TabsContent value="conversations" className="space-y-4">
             {isLoading ? (
               <div className="flex justify-center items-center py-12">
@@ -110,11 +173,19 @@ const MonitoringDashboard = () => {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {activeConversations.map((conversation) => (
                   <Card key={conversation.id}>
-                    <CardHeader>
+                    <CardHeader className="flex justify-between items-center">
                       <CardTitle className="flex items-center gap-2 text-lg text-gray-900">
                         <User className="h-5 w-5 text-gray-900" />
                         {conversation.interviewer_name}
                       </CardTitle>
+                      <button
+                        onClick={() => handleDelete(conversation.id)}
+                        disabled={deleteStatus[conversation.id] === 'deleting'}
+                        className="text-red-500 hover:text-red-700"
+                        aria-label="Delete Conversation"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
                     </CardHeader>
                     <CardContent className="space-y-4">
                       <div className="space-y-2">
@@ -143,11 +214,31 @@ const MonitoringDashboard = () => {
                       <div className="text-xs text-gray-900">
                         Last Activity: {formatDateTime(conversation.last_activity)}
                       </div>
+                      {/* Attention Flags for this Conversation */}
+                      {conversation.attention_flags && conversation.attention_flags.length > 0 && (
+                        <div className="mt-2">
+                          <h5 className="text-sm font-semibold text-red-600">Attention Flags:</h5>
+                          <ul className="list-disc list-inside text-xs text-red-600">
+                            {conversation.attention_flags.map(flag => (
+                              <li key={flag.id} className="flex justify-between items-center">
+                                <span>{flag.message}</span>
+                                <button
+                                  onClick={() => handleResolveFlag(flag.id)} // Safe to use without '!'
+                                  disabled={resolveStatus[flag.id] === 'resolving'}
+                                  className="text-sm text-blue-500 hover:text-blue-700"
+                                >
+                                  Resolve
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
                     </CardContent>
                   </Card>
                 ))}
                 {activeConversations.length === 0 && (
-                  <div className="col-span-2 text-center py-12 text-gray-900">
+                  <div className="col-span-4 text-center py-12 text-gray-900">
                     No active conversations at the moment
                   </div>
                 )}
@@ -155,6 +246,90 @@ const MonitoringDashboard = () => {
             )}
           </TabsContent>
 
+          {/* Completed Conversations Tab */}
+          <TabsContent value="completed" className="space-y-4">
+            {isLoading ? (
+              <div className="flex justify-center items-center py-12">
+                <Loader2 className="h-8 w-8 animate-spin text-gray-900" />
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {completedConversations.map((conversation) => (
+                  <Card key={conversation.id}>
+                    <CardHeader className="flex justify-between items-center">
+                      <CardTitle className="flex items-center gap-2 text-lg text-gray-900">
+                        <User className="h-5 w-5 text-gray-900" />
+                        {conversation.interviewer_name}
+                      </CardTitle>
+                      <button
+                        onClick={() => handleDelete(conversation.id)}
+                        disabled={deleteStatus[conversation.id] === 'deleting'}
+                        className="text-red-500 hover:text-red-700"
+                        aria-label="Delete Conversation"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2 text-sm text-gray-900">
+                          <Mail className="h-4 w-4 text-gray-900" />
+                          {conversation.interviewer_email}
+                        </div>
+                        <div className="flex items-center gap-2 text-sm text-gray-900">
+                          <Phone className="h-4 w-4 text-gray-900" />
+                          {conversation.interviewer_number}
+                        </div>
+                      </div>
+                      <div className="border-t pt-4">
+                        <h4 className="font-medium mb-2 text-gray-900">Interviewees ({conversation.interviewees.length})</h4>
+                        <div className="space-y-2">
+                          {conversation.interviewees.map((interviewee) => (
+                            <div key={interviewee.id} className="text-sm text-gray-900">
+                              <span className="font-medium text-gray-900">{interviewee.name}</span>
+                              <span className={`ml-2 ${getStatusColor(interviewee.status)}`}>
+                                ({interviewee.status})
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="text-xs text-gray-900">
+                        Completed At: {formatDateTime(conversation.completed_at)}
+                      </div>
+                      {/* Attention Flags for this Conversation */}
+                      {conversation.attention_flags && conversation.attention_flags.length > 0 && (
+                        <div className="mt-2">
+                          <h5 className="text-sm font-semibold text-red-600">Attention Flags:</h5>
+                          <ul className="list-disc list-inside text-xs text-red-600">
+                            {conversation.attention_flags.map(flag => (
+                              <li key={flag.id} className="flex justify-between items-center">
+                                <span>{flag.message}</span>
+                                <button
+                                  onClick={() => handleResolveFlag(flag.id)} // Safe to use without '!'
+                                  disabled={resolveStatus[flag.id] === 'resolving'}
+                                  className="text-sm text-blue-500 hover:text-blue-700"
+                                >
+                                  Resolve
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                ))}
+                {completedConversations.length === 0 && (
+                  <div className="col-span-4 text-center py-12 text-gray-900">
+                    No completed conversations at the moment
+                  </div>
+                )}
+              </div>
+            )}
+          </TabsContent>
+
+          {/* Scheduled Interviews Tab */}
           <TabsContent value="scheduled" className="space-y-4">
             {isLoading ? (
               <div className="flex justify-center items-center py-12">
@@ -162,7 +337,7 @@ const MonitoringDashboard = () => {
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {scheduledInterviews.map((interview) => (
+                {scheduledInterviews.map((interview: ScheduledInterview) => (
                   <Card key={interview.id}>
                     <CardHeader>
                       <CardTitle className="flex items-center gap-2 text-lg text-gray-900">
@@ -196,7 +371,7 @@ const MonitoringDashboard = () => {
                   </Card>
                 ))}
                 {scheduledInterviews.length === 0 && (
-                  <div className="col-span-2 text-center py-12 text-gray-900">
+                  <div className="col-span-4 text-center py-12 text-gray-900">
                     No scheduled interviews at the moment
                   </div>
                 )}
@@ -204,6 +379,7 @@ const MonitoringDashboard = () => {
             )}
           </TabsContent>
 
+          {/* Attention Required Tab */}
           <TabsContent value="attention" className="space-y-4">
             {isLoading ? (
               <div className="flex justify-center items-center py-12">
@@ -216,9 +392,19 @@ const MonitoringDashboard = () => {
                     <AlertCircle className="h-4 w-4 text-gray-900" />
                     <AlertDescription className="flex justify-between items-center text-gray-900">
                       <span>{flag.message}</span>
-                      <span className="text-sm text-gray-900">
-                        {formatDateTime(flag.created_at)}
-                      </span>
+                      <div className="flex items-center space-x-2">
+                        <button
+                          onClick={() => handleResolveFlag(flag.id)} // Safe to use without '!'
+                          disabled={resolveStatus[flag.id] === 'resolving'}
+                          className="text-sm text-blue-500 hover:text-blue-700"
+                          aria-label={`Resolve attention flag: ${flag.message}`}
+                        >
+                          Resolve
+                        </button>
+                        <span className="text-sm text-gray-900">
+                          {formatDateTime(flag.created_at)}
+                        </span>
+                      </div>
                     </AlertDescription>
                   </Alert>
                 ))}
@@ -230,7 +416,7 @@ const MonitoringDashboard = () => {
               </div>
             )}
           </TabsContent>
-        </Tabs>
+        </Tabs> {/* Properly closed the Tabs component */}
 
         <div className="mt-8 flex justify-end">
           <button

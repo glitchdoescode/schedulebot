@@ -25,7 +25,7 @@ if not logger.hasHandlers():
     )
 
 class LLMModel:
-    def generate_message(self, participant_name, participant_number, participant_email, participant_role, superior_flag, meeting_duration, role_to_contact_name, role_to_contact_number, role_to_contact_email, company_details, conversation_history, conversation_state, user_message, system_message, other_participant_conversation_history):
+    def generate_message(self, participant_name, participant_number, participant_email, participant_role, superior_flag, meeting_duration, role_to_contact_name, role_to_contact_number, role_to_contact_email, company_details, conversation_history, conversation_state, user_message, system_message):
         # Guardrail: Validate user input before invoking the LLM
         correction_message = self.correct_user_input_with_nlp(user_message)
         if correction_message:
@@ -55,8 +55,7 @@ class LLMModel:
                 'conversation_history',
                 'conversation_state',
                 'user_message',
-                'system_message',
-                'other_participant_conversation_history'
+                'system_message'
             ],
             template=PROMPT_TEMPLATE
         )
@@ -77,8 +76,7 @@ class LLMModel:
             'conversation_history': conversation_history,
             'conversation_state': conversation_state,
             'user_message': user_message,
-            'system_message': system_message,
-            'other_participant_conversation_history': other_participant_conversation_history
+            'system_message': system_message
         })
         
         logger.info(f"Generated message response: {response.content}")
@@ -92,7 +90,10 @@ Participant Name: {participant_name}
 Participant Role: {participant_role}
 Meeting Duration: {meeting_duration}
 Role to Contact: {role_to_contact_name}
-Conversation History: {conversation_history}
+Conversation History: 
+```
+{conversation_history}
+```
 Conversation State: {conversation_state}
 User Message: {user_message}
 
@@ -270,59 +271,228 @@ Answer the participant's question in a professional and concise manner.
 
             # Return correction if any, else an empty string
         return " ".join(corrections) if corrections else ""
-
     
-    def generate_conversational_message(self, participant_name, participant_number, participant_email, participant_role, superior_flag, meeting_duration, role_to_contact_name, role_to_contact_number, role_to_contact_email, company_details, conversation_history, conversation_state, user_message, system_message, other_participant_conversation_history):
-        PROMPT_TEMPLATE = f"""{PROMPT_TEMPLATES.CONVERSATIONAL_PROMPT_TEMPLATE}"""
+    def extract_slot_info(self, user_message, available_slots):
+        """
+        Extract multiple slot information (start_time and end_time) from the user message.
+
+        Args:
+            user_message (str): The user's natural language message.
+            available_slots (list): List of current available slots for reference.
+
+        Returns:
+            list: A list of dictionaries, each containing 'start_time' and 'end_time'.
+        """
+        try:
+            json_template = """
+                [
+                    {{
+                        "start_time": "YYYY-MM-DDTHH:MM:SS",
+                        "end_time": "YYYY-MM-DDTHH:MM:SS"
+                    }},
+                    {{
+                        "start_time": "YYYY-MM-DDTHH:MM:SS",
+                        "end_time": "YYYY-MM-DDTHH:MM:SS"
+                    }}
+                ]
+            """
+            PROMPT_TEMPLATE = f"""
+                Extract all slot information from the following message.
+
+                **Input Message**:
+                {user_message}
+
+                **Available Slots for Reference**:
+                {available_slots}
+
+                **Output Format (Do not include anything other than JSON array of slots)**:
+                {json_template}
+            """
+
+            prompt = PromptTemplate(
+                input_variables=['user_message'],
+                template=PROMPT_TEMPLATE
+            )
+
+            llm_model = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                temperature=0.3,
+            )
+
+            chain = prompt | llm_model
+
+            response = chain.invoke({'user_message': user_message})
+            llm_output = response.content.strip()
+
+            logger.info(f"Extracted slot info response: {llm_output}")
+
+            # Extract JSON from the response
+            parsed_data = self.extract_json_from_response(llm_output)
+
+            if not parsed_data:
+                logger.error("Failed to extract slot information from the response.")
+                return None
+
+            # Validate each slot in the list
+            valid_slots = []
+            for slot in parsed_data:
+                if 'start_time' not in slot or 'end_time' not in slot:
+                    logger.error("One of the extracted slots is incomplete.")
+                    continue
+                try:
+                    datetime.fromisoformat(slot['start_time'])
+                    datetime.fromisoformat(slot['end_time'])
+                    valid_slots.append(slot)
+                except ValueError:
+                    logger.error(f"Invalid datetime format in slot: {slot}")
+                    continue
+
+            if not valid_slots:
+                logger.error("No valid slots were extracted.")
+                return None
+
+            return valid_slots
+
+        except Exception as e:
+            logger.error(f"Error in extract_slot_info: {str(e)}")
+            return None
+
+    def extract_slot_info_for_update(self, user_message, available_slots):
+        """
+        Extract multiple slot update information (old_start_time and new_start_time) from the user message.
+
+        Args:
+            user_message (str): The user's natural language message.
+            available_slots (list): List of current available slots for reference.
+
+        Returns:
+            list: A list of dictionaries, each containing 'old_start_time' and 'new_start_time'.
+        """
+        try:
+            json_template = """
+                [
+                    {{
+                        "old_start_time": "YYYY-MM-DDTHH:MM:SS",
+                        "new_start_time": "YYYY-MM-DDTHH:MM:SS"
+                    }},
+                    {{
+                        "old_start_time": "YYYY-MM-DDTHH:MM:SS",
+                        "new_start_time": "YYYY-MM-DDTHH:MM:SS"
+                    }}
+                ]
+            """
+            PROMPT_TEMPLATE = f"""
+                Extract all slot update information from the following message.
+
+                **Input Message**:
+                {user_message}
+
+                **Available Slots for Reference**:
+                {available_slots}
+
+                **Output Format (Do not include anything other than JSON array of slot updates)**:
+                {json_template}
+            """
+
+            prompt = PromptTemplate(
+                input_variables=['user_message'],
+                template=PROMPT_TEMPLATE
+            )
+
+            llm_model = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                temperature=0.3,
+            )
+
+            chain = prompt | llm_model
+
+            response = chain.invoke({'user_message': user_message})
+            llm_output = response.content.strip()
+
+            logger.info(f"Extracted slot update info response: {llm_output}")
+
+            # Extract JSON from the response
+            parsed_data = self.extract_json_from_response(llm_output)
+
+            if not parsed_data:
+                logger.error("Failed to extract slot update information from the response.")
+                return None
+
+            # Validate each slot update in the list
+            valid_slot_updates = []
+            for slot in parsed_data:
+                if 'old_start_time' not in slot or 'new_start_time' not in slot:
+                    logger.error("One of the extracted slot updates is incomplete.")
+                    continue
+                try:
+                    datetime.fromisoformat(slot['old_start_time'])
+                    datetime.fromisoformat(slot['new_start_time'])
+                    valid_slot_updates.append(slot)
+                except ValueError:
+                    logger.error(f"Invalid datetime format in slot update: {slot}")
+                    continue
+
+            if not valid_slot_updates:
+                logger.error("No valid slot updates were extracted.")
+                return None
+
+            return valid_slot_updates
+
+        except Exception as e:
+            logger.error(f"Error in extract_slot_info_for_update: {str(e)}")
+            return None
+    
+    # def generate_conversational_message(self, participant_name, participant_number, participant_email, participant_role, superior_flag, meeting_duration, role_to_contact_name, role_to_contact_number, role_to_contact_email, company_details, conversation_history, conversation_state, user_message, system_message, other_participant_conversation_history):
+    #     PROMPT_TEMPLATE = f"""{PROMPT_TEMPLATES.CONVERSATIONAL_PROMPT_TEMPLATE}"""
         
-        llm_model = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash",
-            temperature=1,
-        )
+    #     llm_model = ChatGoogleGenerativeAI(
+    #         model="gemini-1.5-flash",
+    #         temperature=1,
+    #     )
 
-        prompt_template = PromptTemplate(
-            input_variables=[
-                'participant_name',
-                'participant_number',
-                'participant_email',
-                'participant_role',
-                'superior_flag',
-                'meeting_duration',
-                'role_to_contact_name',
-                'role_to_contact_number',
-                'role_to_contact_email',
-                'company_details',
-                'conversation_history',
-                'conversation_state',
-                'user_message',
-                'system_message',
-                'other_participant_conversation_history'
-            ],
-            template=PROMPT_TEMPLATE
-        )
+    #     prompt_template = PromptTemplate(
+    #         input_variables=[
+    #             'participant_name',
+    #             'participant_number',
+    #             'participant_email',
+    #             'participant_role',
+    #             'superior_flag',
+    #             'meeting_duration',
+    #             'role_to_contact_name',
+    #             'role_to_contact_number',
+    #             'role_to_contact_email',
+    #             'company_details',
+    #             'conversation_history',
+    #             'conversation_state',
+    #             'user_message',
+    #             'system_message',
+    #             'other_participant_conversation_history'
+    #         ],
+    #         template=PROMPT_TEMPLATE
+    #     )
 
-        chain = prompt_template | llm_model
+    #     chain = prompt_template | llm_model
 
-        response = chain.invoke({
-            'participant_name': participant_name,
-            'participant_number': participant_number,
-            'participant_email': participant_email,
-            'participant_role': participant_role,
-            'superior_flag': superior_flag,
-            'meeting_duration': meeting_duration,
-            'role_to_contact_name': role_to_contact_name,
-            'role_to_contact_number': role_to_contact_number,
-            'role_to_contact_email': role_to_contact_email,
-            'company_details': company_details,
-            'conversation_history': conversation_history,
-            'conversation_state': conversation_state,
-            'user_message': user_message,
-            'system_message': system_message,
-            'other_participant_conversation_history': other_participant_conversation_history
-        })
+    #     response = chain.invoke({
+    #         'participant_name': participant_name,
+    #         'participant_number': participant_number,
+    #         'participant_email': participant_email,
+    #         'participant_role': participant_role,
+    #         'superior_flag': superior_flag,
+    #         'meeting_duration': meeting_duration,
+    #         'role_to_contact_name': role_to_contact_name,
+    #         'role_to_contact_number': role_to_contact_number,
+    #         'role_to_contact_email': role_to_contact_email,
+    #         'company_details': company_details,
+    #         'conversation_history': conversation_history,
+    #         'conversation_state': conversation_state,
+    #         'user_message': user_message,
+    #         'system_message': system_message,
+    #         'other_participant_conversation_history': other_participant_conversation_history
+    #     })
         
-        logger.info(f"Generated conversational message response: {response.content}")
-        return response.content
+    #     logger.info(f"Generated conversational message response: {response.content}")
+    #     return response.content
 
     def detect_intent(self, participant_name, participant_role, meeting_duration, role_to_contact, conversation_history, conversation_state, user_message):
         PROMPT_TEMPLATE = f"""{PROMPT_TEMPLATES.DETECT_INTENT_PROMPT_TEMPLATE}"""
@@ -385,48 +555,46 @@ Answer the participant's question in a professional and concise manner.
 
     def detect_confirmation(self, participant_name, participant_role, meeting_duration, conversation_history, conversation_state, user_message):
         
-        json="""
+        json = """
             {{
                 "confirmed": true/false,
                 "reason": "Optional explanation if not confirmed or unclear"
             }}
             """
-        
+
         PROMPT_TEMPLATE = f"""
-Using the input variables, determine whether the participant has confirmed or declined the proposed meeting time based on their latest message and conversation history.
+        Using the input variables, determine whether the participant has confirmed or declined a given proposal, request, or statement based on their latest message and conversation history.
 
-**Multilingual Handling**:
-- While analyzing the conversation history and user message, consider the language of the messages to ensure contextual understanding.
-- **Output the confirmation status in English** in the specified format, regardless of the input language.
+        **Multilingual Handling**:
+        - While analyzing the conversation history and user message, consider the language of the messages to ensure contextual understanding.
+        - **Output the confirmation status in English** in the specified format, regardless of the input language.
 
-**Input Variables:**
+        **Input Variables:**
 
-- **Participant Name**: {participant_name}
-- **Participant Role**: {participant_role}
-- **Meeting Duration**: {meeting_duration}
-- **Conversation History**: {conversation_history} (all previous messages exchanged with the participant)
-- **Conversation State**: {conversation_state} (current stage in the scheduling process)
-- **User Message**: {user_message} (latest message from the participant)
+        - **Participant Name**: {participant_name}
+        - **Participant Role**: {participant_role}
+        - **Conversation History**: {conversation_history} (all previous messages exchanged with the participant)
+        - **Conversation State**: {conversation_state} (current stage in the process)
+        - **User Message**: {user_message} (latest message from the participant)
 
-### Task
+        ### Task
 
-1. **Analyze**: Review the conversation history and user message to understand if the participant has confirmed or declined the proposed meeting time.
+        1. **Analyze**: Review the conversation history and user message to determine whether the participant has confirmed, declined, or left the response ambiguous regarding the subject of discussion.
 
-2. **Determine Confirmation**:
-   - If the participant has **explicitly confirmed** the proposed time (e.g., "Yes, that works for me", "I confirm the meeting", "Sounds good"), mark as **confirmed**.
-   - If the participant has **declined** the proposed time (e.g., "I can't make it at that time", "No, that doesn't work"), mark as **not confirmed**.
-   - If the response is **ambiguous** or does not provide a clear confirmation or declination, mark as **unclear**.
+        2. **Determine Confirmation**:
+        - If the participant has **explicitly confirmed** (e.g., "Yes", "Okay", "Sounds good", "I agree", "That works for me"), mark as **confirmed**.
+        - If the participant has **declined** (e.g., "No", "I can't", "That doesn't work", "I disagree"), mark as **not confirmed**.
+        - If the response is **ambiguous**, unclear, or lacks sufficient context to determine confirmation (e.g., "Let me check", "I'm not sure"), mark as **unclear**.
 
-3. **Output Format**:
-   - Output only the confirmation status in JSON format:
+        3. **Output Format**:
+        - Output only the confirmation status in JSON format:
 
-   ```json
-
-   {json}
-
-   ```
-
-"""
+        ```json
+        {json}
+        Notes:
+        This task applies to general confirmations and not just time-based confirmations.
+        Take into account the conversation's current state to infer context.
+        Include a reason in the JSON output only if the status is not confirmed or unclear. """
         
         llm_model = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash",
@@ -580,3 +748,114 @@ d database
                 'is_relevant': True,
                 'context_type': 'scheduling'
             }
+        
+    def extract_meeting_duration(self, user_message):
+        """
+        Extract the meeting duration (in minutes) from the user's message.
+        
+        Expected Output Format:
+        ```json
+        {
+            "meeting_duration": 30
+        }
+        ```
+        """
+        try:
+            json_template = """
+                {{
+                    "meeting_duration": 30
+                }}
+            """
+            PROMPT_TEMPLATE = f"""
+                Extract the meeting duration in minutes from the following message:
+                "{user_message}"
+
+                The output should be a JSON in the format:
+                ```json
+                {json_template}
+                ```
+                where "meeting_duration" is an integer representing the duration in minutes.
+            """
+
+            prompt = PromptTemplate(
+                input_variables=['user_message'],
+                template=PROMPT_TEMPLATE
+            )
+
+            llm_model = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                temperature=0.3,
+            )
+
+            chain = prompt | llm_model
+            response = chain.invoke({'user_message': user_message})
+            llm_output = response.content.strip()
+
+            logger.info(f"Extracted meeting duration response: {llm_output}")
+
+            parsed_data = self.extract_json_from_response(llm_output)
+
+            if not parsed_data or 'meeting_duration' not in parsed_data:
+                logger.error("Failed to extract meeting duration from the response.")
+                return None
+
+            duration = parsed_data['meeting_duration']
+            if not isinstance(duration, int) or duration <= 0:
+                logger.error("Meeting duration is not a positive integer.")
+                return None
+
+            return duration
+
+        except Exception as e:
+            logger.error(f"Error in extract_meeting_duration: {str(e)}")
+            return None
+    
+    def extract_interviewee_name(self, user_message):
+        """
+        Extracts the interviewee's name from the cancellation message.
+
+        Args:
+            user_message (str): The user's cancellation message.
+
+        Returns:
+            str: The extracted interviewee's name if found, else None.
+        """
+        try:
+            json1="""
+                {{
+                    "interviewee_name": "Name here"
+                }}
+            """
+            
+            PROMPT_TEMPLATE = f"""
+                Extract the interviewee's name from the following cancellation message.
+
+                Message: "{user_message}"
+
+                ### Extraction
+                {json1}
+            """
+            prompt_template = PromptTemplate(
+                input_variables=['user_message'],
+                template=PROMPT_TEMPLATE
+            )
+
+            llm_model = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                temperature=0.3,
+            )
+
+            chain = prompt_template | llm_model
+            response = chain.invoke({'user_message': user_message})
+            llm_output = response.content.strip()
+
+            # Extract JSON from the response
+            parsed_data = self.extract_json_from_response(llm_output)
+            interviewee_name = parsed_data.get("interviewee_name")
+
+            if interviewee_name:
+                return interviewee_name.strip()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting interviewee name: {str(e)}")
+            return None
